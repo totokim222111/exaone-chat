@@ -20,6 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
 from search_support import pipeline as search_pipeline
+from key_rotation import KeySet, POOL, Exhausted, rotating_response
 
 DEFAULT_BASE_URL = "https://api.exaone.ai/v1"
 DEFAULT_MODEL = "k-exaone_v2.5"
@@ -87,6 +88,13 @@ class Config:
     tavily_key: str | None = field(default=None, repr=False)
     brave_key: str | None = field(default=None, repr=False)
 
+    api_keys: tuple[str, ...] = field(default=(), repr=False)
+    key_trace: dict = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def keys(self):
+        return KeySet([dict(key=key, index=index) for index, key in enumerate(self.api_keys or ((self.api_key,) if self.api_key else ()), 1)], self.key_trace)
+
     @property
     def exaone_style(self) -> bool:
         return (urlsplit(self.base_url).hostname or "").lower() in self.style_hosts
@@ -111,14 +119,26 @@ def load_config() -> Config:
         value = settings.get(name)
         return value.strip() if isinstance(value, str) else ""
 
-    key = os.environ.get("EXAONE_API_KEY", "").strip()
-    key_source = "환경변수" if key else "없음"
-    if not key and setting("apiKey"):
+    keys = [key.strip() for key in os.environ.get("EXAONE_API_KEYS", "").split(',') if key.strip()]
+    key_source = "환경변수 EXAONE_API_KEYS" if keys else "없음"
+    if not keys:
+        key = os.environ.get("EXAONE_API_KEY", "").strip()
+        if key:
+            keys, key_source = [key], "환경변수"
+    if not keys:
+        encoded = settings.get("apiKeys")
         try:
-            key = unprotect_key(setting("apiKey"))
-            key_source = "윈도우 앱 설정" if key else "없음"
-        except ExaoneError as exc:
-            warning = str(exc)
+            if isinstance(encoded, list) and encoded:
+                keys = [unprotect_key(entry['key']) for entry in encoded]
+                key_source = "윈도우 앱 설정"
+            elif setting("apiKey"):
+                keys = [unprotect_key(setting("apiKey"))]
+                key_source = "윈도우 앱 설정"
+        except (ExaoneError, KeyError, TypeError):
+            keys = []; warning = "윈도우 앱 API 키를 현재 Windows 사용자로 복호화할 수 없습니다"
+    if len(keys) > 5:
+        keys = keys[:5]; warning = "API 키는 처음 5개까지만 사용합니다"
+    key = keys[0] if keys else None
     base = os.environ.get("EXAONE_BASE_URL", "").strip() or setting("baseUrl") or DEFAULT_BASE_URL
     model = os.environ.get("EXAONE_MODEL", "").strip() or setting("model") or DEFAULT_MODEL
     hosts = {"api.exaone.ai"}
@@ -146,7 +166,7 @@ def load_config() -> Config:
         searxng = ""
         warning = "검색 서버 주소는 인증정보 없는 HTTP 또는 HTTPS 주소여야 합니다"
     return Config(key or None, key_source, base.rstrip("/"), model, frozenset(hosts), warning,
-                  provider, searxng.rstrip("/"), search_keys["tavily"], search_keys["brave"])
+                  provider, searxng.rstrip("/"), search_keys["tavily"], search_keys["brave"], api_keys=tuple(keys))
 
 
 class HistoryMessage(BaseModel):
@@ -192,6 +212,8 @@ class Completion:
     reasoning: str
     usage: dict[str, int]
     elapsed: float
+    key_index: int | None = None
+    key_failover: list = field(default_factory=list)
 
 
 async def consume_sse(response: httpx.Response, key: str | None = None) -> Completion:
@@ -256,18 +278,24 @@ async def request_completion(config: Config, body: dict, *,
         async with asyncio.timeout(TOTAL_TIMEOUT):
             async with httpx.AsyncClient(timeout=httpx.Timeout(IDLE_TIMEOUT), transport=transport,
                                          follow_redirects=False, trust_env=False) as client:
-                async with client.stream("POST", config.base_url + "/chat/completions", json=body,
-                                         headers={"Authorization": f"Bearer {config.api_key}",
-                                                  "Accept": "text/event-stream"}) as response:
+                async with rotating_response(client, config.base_url + "/chat/completions", body, config.keys) as response:
                     if response.status_code < 200 or response.status_code >= 300:
                         raw = (await response.aread()).decode("utf-8", errors="replace")
-                        message = extract_error(raw, config.api_key)
+                        message = extract_error(raw, config.key_trace.get("_key"))
                         if response.status_code in {401, 403}:
                             message = "API 키를 확인하세요: " + message
                         raise ExaoneError(message, response.status_code)
-                    result = await consume_sse(response, config.api_key)
+                    if body.get("stream", True):
+                        result = await consume_sse(response, config.key_trace.get("_key"))
+                    else:
+                        raw = json.loads(await response.aread())
+                        result = Completion(raw['choices'][0]['message'].get('content') or '', '', {}, 0)
+                    result.key_index = config.key_trace.get('keyIndex')
+                    result.key_failover = list(config.key_trace.get('keyFailover', []))
                     result.elapsed = time.monotonic() - started
                     return result
+    except Exhausted as exc:
+        raise ExaoneError(str(exc), 429) from None
     except ExaoneError:
         raise
     except TimeoutError:
@@ -280,7 +308,8 @@ async def request_completion(config: Config, body: dict, *,
 
 def error_text(error: ExaoneError, config: Config) -> str:
     code = str(error.status) if error.status is not None else "없음"
-    detail = " ".join(redact(str(error), config.api_key).split())
+    detail = " ".join(str(error).split())
+    for entry in config.keys: detail = redact(detail, entry["key"])
     return f"EXAONE 요청에 실패했습니다 (상태코드: {code}): {detail}."
 
 
@@ -294,14 +323,24 @@ def format_completion(result: Completion, config: Config, effort: str, include_r
     parts.append(f"모델: {config.model} | 추론 강도: {applied} | "
                  f"토큰(생각/답변): {tokens.get('reasoning_tokens', '미제공')}/{tokens.get('completion_tokens', '미제공')} "
                  f"| 입력 토큰: {tokens.get('prompt_tokens', '미제공')} | 걸린 시간: {result.elapsed:.2f}초")
-    return redact("\n\n".join(parts), config.api_key)
+    if result.key_failover:
+        parts.append(f"키 {result.key_index}번 사용 ({', '.join(str(x['index'])+'번' for x in result.key_failover)} 한도 초과)")
+    text = "\n\n".join(parts)
+    for entry in config.keys: text = redact(text, entry['key'])
+    return text
 
 
 async def prepare_search(config, body, prompt, limit):
     async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
-        queries = await search_pipeline.plan_queries(client, config.base_url, config.api_key,
-            search_pipeline.query_body(config.model, body["messages"], prompt, config.exaone_style,
-                urlsplit(config.base_url).hostname == "api.friendli.ai"), prompt)
+        try:
+            async with asyncio.timeout(30):
+                planned = await request_completion(config, search_pipeline.query_body(config.model, body["messages"], prompt, config.exaone_style, urlsplit(config.base_url).hostname == "api.friendli.ai"))
+                queries = search_pipeline.parse_queries(planned.content, prompt)
+        except ExaoneError as exc:
+            if exc.status in (401, 403, 429): raise
+            queries = search_pipeline.parse_queries('', prompt)
+        except (TimeoutError, ValueError, KeyError, TypeError):
+            queries = search_pipeline.parse_queries('', prompt)
         return await search_pipeline.search_queries(client, queries, config.search_provider,
             config.tavily_key, config.brave_key, config.searxng_url, limit=limit)
 
@@ -318,8 +357,10 @@ def format_search_completion(result, config, search, elapsed, include_reasoning=
     parts.append(f'검색 제공자: {search["provider"] or "없음"} | 검색어: {len(search["queries"])}개 | '
         f'토큰(입력/출력/추론): {tokens.get("prompt_tokens", "미제공")}/{tokens.get("completion_tokens", "미제공")}/'
         f'{tokens.get("reasoning_tokens", "미제공")} | 시간: {elapsed:.2f}초')
+    if result.key_failover:
+        parts.append(f"키 {result.key_index}번 사용 ({', '.join(str(x['index'])+'번' for x in result.key_failover)} 한도 초과)")
     text = "\n\n".join(parts)
-    for key in (config.api_key, config.tavily_key, config.brave_key):
+    for key in (*[entry["key"] for entry in config.keys], config.tavily_key, config.brave_key):
         text = redact(text, key)
     return text
 
@@ -392,20 +433,27 @@ async def exaone_status() -> str:
     suffix = config.api_key[-4:] if config.api_key and len(config.api_key) > 4 else "숨김" if config.api_key else "없음"
     lines = [f"키 출처: {config.key_source}", f"키 끝 4자리: {suffix}",
              f"Base URL: {config.base_url}", f"모델: {config.model}"]
+    lines.append(f"키 개수: {len(config.keys)}")
     if config.warning:
         lines.append(f"설정 안내: {config.warning}")
     lines.append(await search_status(config))
     started = time.monotonic()
     try:
         body = build_body(config, "연결 확인입니다. OK라고 짧게 답하세요.", reasoning_effort="low", max_tokens=64)
-        await request_completion(config, body)
+        checked = await request_completion(config, body)
+        if checked.key_failover:
+            lines.append(f"키 {checked.key_index}번 사용 ({', '.join(str(x['index'])+'번' for x in checked.key_failover)} 한도 초과)")
         lines.append(f"연결 확인: 성공 | 지연 시간: {time.monotonic() - started:.2f}초")
     except ExaoneError as exc:
         lines.append(f"연결 확인: 실패 | {error_text(exc, config)} | 지연 시간: {time.monotonic() - started:.2f}초")
     except Exception:
         lines.append(f"연결 확인: 실패 | 내부 오류 (상태코드: 없음) | 지연 시간: {time.monotonic() - started:.2f}초")
+    for entry in config.keys:
+        suffix = entry['key'][-4:] if len(entry['key']) > 4 else '숨김'
+        remaining = POOL.remaining(entry)
+        lines.append(f"키 {entry['index']}번 · 끝 4자리 {suffix} · 출처 {config.key_source} · " + (f"쉬는 중 {remaining}초" if remaining else "사용 가능"))
     result = "\n".join(lines)
-    for key in (config.api_key, config.tavily_key, config.brave_key):
+    for key in (*[entry["key"] for entry in config.keys], config.tavily_key, config.brave_key):
         result = redact(result, key)
     return result
 

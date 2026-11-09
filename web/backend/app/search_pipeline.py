@@ -52,12 +52,25 @@ def query_body(model, history, question, official, friendli=False):
 async def plan_queries(client, base_url, api_key, body, question):
     try:
         async with asyncio.timeout(30):
-            response = await client.post(base_url.rstrip("/") + "/chat/completions", json=body,
-                headers={"Authorization": "Bearer " + api_key}, timeout=30)
-            response.raise_for_status()
+            if isinstance(api_key, str):
+                response = await client.post(base_url.rstrip("/") + "/chat/completions", json=body,
+                    headers={"Authorization": "Bearer " + api_key}, timeout=30)
+                response.raise_for_status()
+            else:
+                try:
+                    from .key_rotation import rotating_response, PlannerError
+                except ImportError:
+                    from key_rotation import rotating_response, PlannerError
+                async with rotating_response(client, base_url.rstrip("/") + "/chat/completions", body, api_key, timeout=30) as response:
+                    if response.status_code in (401, 403):
+                        raise PlannerError("검색어 생성 API 키를 확인하세요.", response.status_code)
+                    response.raise_for_status()
+                    await response.aread()
             text = response.json()["choices"][0]["message"]["content"]
             return parse_queries(text, question)
-    except Exception:
+    except Exception as exc:
+        if getattr(exc, "status", None) in (401, 403, 429):
+            raise
         return parse_queries("", question)
 
 

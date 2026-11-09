@@ -8,6 +8,7 @@ ARTIFACTS = Path(__file__).parent / "frontend_artifacts"
 
 def panel(page):
     page.locator("#openSettings").click()
+    expect(page.locator('#apiKeys')).to_have_attribute('aria-busy','false')
 
 
 def save(page):
@@ -18,6 +19,13 @@ def save(page):
 
 def key(page, value):
     panel(page)
+    # Change the mock fixture's primary key through the list UI.
+    from frontend_features_smoke import hold
+    expect(page.locator('.key-row').first).to_be_visible()
+    while page.locator('.key-row').count():
+        previous=page.locator('.key-row').count()
+        hold(page,'.key-row:first-child .key-remove')
+        expect(page.locator('.key-row')).to_have_count(previous-1)
     page.locator("#apiKey").fill(value)
     save(page)
 

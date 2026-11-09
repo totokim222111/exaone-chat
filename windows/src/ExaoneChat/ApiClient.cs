@@ -51,48 +51,61 @@ internal sealed class ApiClient : IDisposable
         catch (JsonException) { }
         return body[..Math.Min(body.Length, 300)];
     }
-    private async Task<HttpResponseMessage> Request(AppSettings s, string key, IEnumerable<ChatMessage> messages, bool stream, CancellationToken ct, Dictionary<string, object>? customBody = null, string? searchContext = null)
+    private async Task<HttpResponseMessage> Request(AppSettings s, string key, IEnumerable<ChatMessage> messages, bool stream, CancellationToken ct, Dictionary<string, object>? customBody = null, string? searchContext = null, KeyTrace? trace = null)
     {
-        SettingsStore.Validate(s);
-        if (string.IsNullOrWhiteSpace(key)) throw new ApiException(AuthGuidance, 401);
-        using var req = new HttpRequestMessage(HttpMethod.Post, s.BaseUrl.TrimEnd('/') + "/chat/completions");
-        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-        req.Content = new StringContent(Json.Serialize(customBody ?? Body(s, messages, stream, new Uri(s.BaseUrl).Host, searchContext)), Encoding.UTF8, "application/json");
+        SettingsStore.Validate(s); trace ??= new(); trace.KeyIndex = null;
+        var keys = KeyRotation.Keys(s, key);
+        if (keys.Count == 0) throw new ApiException(AuthGuidance, 401);
+        var json = Json.Serialize(customBody ?? Body(s, messages, stream, new Uri(s.BaseUrl).Host, searchContext));
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(120));
-        HttpResponseMessage response;
-        try { response = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeout.Token); }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new ApiException("서버 응답 시간이 초과되었습니다. 다시 시도하세요."); }
-        if (!response.IsSuccessStatusCode)
+        foreach (var entry in keys)
         {
-            using (response)
+            var remaining = KeyRotation.Remaining(entry.Identity);
+            if (remaining > 0) { trace.Record(entry.Index, remaining); continue; }
+            using var req = new HttpRequestMessage(HttpMethod.Post, s.BaseUrl.TrimEnd('/') + "/chat/completions");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", entry.Key);
+            req.Content = new StringContent(json, Encoding.UTF8, "application/json");
+            HttpResponseMessage response;
+            try { response = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeout.Token); }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new ApiException("서버 응답 시간이 초과되었습니다. 다시 시도하세요."); }
+            if ((int)response.StatusCode == 429)
             {
-                var body = await response.Content.ReadAsStringAsync(timeout.Token);
-                var detail = ErrorDetail(body);
-                detail = detail.Replace(key, "[키 숨김]", StringComparison.Ordinal);
-                throw new ApiException($"HTTP {(int)response.StatusCode} · {detail}" + ((int)response.StatusCode is 401 or 403 ? " · " + AuthGuidance : ""), (int)response.StatusCode);
+                var seconds = KeyRotation.RetrySeconds(response.Headers.TryGetValues("Retry-After", out var values) ? values.FirstOrDefault() : null);
+                response.Dispose(); KeyRotation.Pause(entry.Identity, seconds); trace.Record(entry.Index, seconds); continue;
             }
+            trace.KeyIndex = entry.Index;
+            if (!response.IsSuccessStatusCode)
+            {
+                using (response)
+                {
+                    var detail = ErrorDetail(await response.Content.ReadAsStringAsync(timeout.Token));
+                    foreach (var secret in keys) detail = detail.Replace(secret.Key, "[키 숨김]", StringComparison.Ordinal);
+                    throw new ApiException($"HTTP {(int)response.StatusCode} · {detail}" + ((int)response.StatusCode is 401 or 403 ? " · " + AuthGuidance : ""), (int)response.StatusCode);
+                }
+            }
+            return response;
         }
-        return response;
+        throw new ApiException($"등록된 키 {keys.Count}개가 모두 한도 초과 · 가장 빠른 재시도 {keys.Min(k => KeyRotation.Remaining(k.Identity))}초 후", 429);
     }
-    public async Task Check(AppSettings s, string key, CancellationToken ct)
+    public async Task Check(AppSettings s, string key, CancellationToken ct, KeyTrace? trace = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(30));
         try
         {
-            using var res = await Request(s, key, [new() { Content = "hi" }], false, timeout.Token);
+            using var res = await Request(s, key, [new() { Content = "hi" }], false, timeout.Token, trace: trace);
             // A successful HTTP response verifies key/model, even when all tokens went to reasoning.
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new ApiException("연결 확인 시간이 초과되었습니다."); }
     }
-    internal async Task<string> Complete(AppSettings s, string key, Dictionary<string, object> body, CancellationToken ct)
+    internal async Task<string> Complete(AppSettings s, string key, Dictionary<string, object> body, CancellationToken ct, KeyTrace? trace = null)
     {
-        using var res = await Request(s, key, [], false, ct, body);
+        using var res = await Request(s, key, [], false, ct, body, trace: trace);
         using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
         return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
     }
-    public async Task Stream(AppSettings s, string key, IEnumerable<ChatMessage> messages, Action<string, string> emit, CancellationToken ct, Action<ChatUsage>? usage = null, string? searchContext = null)
+    public async Task Stream(AppSettings s, string key, IEnumerable<ChatMessage> messages, Action<string, string> emit, CancellationToken ct, Action<ChatUsage>? usage = null, string? searchContext = null, KeyTrace? trace = null)
     {
         var contentStarted = false;
         void Emit(string kind, string value)
@@ -109,7 +122,7 @@ internal sealed class ApiClient : IDisposable
         ChatUsage? latestUsage = null;
         try
         {
-            using var res = await Request(s, key, messages, true, ct, searchContext: searchContext);
+            using var res = await Request(s, key, messages, true, ct, searchContext: searchContext, trace: trace);
             using var stream = await res.Content.ReadAsStreamAsync(ct);
             using var reader = new StreamReader(stream, Encoding.UTF8);
             var data = new StringBuilder();
@@ -137,7 +150,11 @@ internal sealed class ApiClient : IDisposable
                         }
                     }
                     if (root.TryGetProperty("error", out _) || (!root.TryGetProperty("choices", out _) && root.TryGetProperty("result_code", out _)))
-                        throw new ApiException(ErrorDetail(payload).Replace(key, "[키 숨김]", StringComparison.Ordinal));
+                        {
+                        var detail = ErrorDetail(payload);
+                        foreach (var secret in KeyRotation.Keys(s, key)) detail = detail.Replace(secret.Key, "[키 숨김]", StringComparison.Ordinal);
+                        throw new ApiException(detail);
+                    }
                     if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0) return;
                     if (!choices[0].TryGetProperty("delta", out var delta)) return;
                     if (delta.TryGetProperty("reasoning_content", out var reason) && reason.ValueKind == JsonValueKind.String && reason.GetString() is { Length: > 0 } r) emit("reasoning", r);

@@ -67,7 +67,7 @@ def run_web(browser, mobile=False):
         expect(public_page.locator('.answer-content')).to_contain_text('EXAONE')
         assert public_page.locator('.citation a').count() == 2
         assert public_page.locator('#sidebar,#composer,.message-edit,.message-retry,.reasoning:not([hidden])').count() == 0
-        assert len(public_calls) == 1 and '/api/public/shares/' in public_calls[0], public_calls
+        assert len(public_calls) == 2 and public_calls[0].endswith('/api/config') and '/api/public/shares/' in public_calls[1], public_calls
         assert not public_errors, public_errors
         assert public_page.evaluate('document.documentElement.scrollWidth <= innerWidth')
         public_page.screenshot(path=str(OUT / (label + '-public-dark.png')))

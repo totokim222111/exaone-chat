@@ -178,7 +178,7 @@ internal static class SelfTest
             var store = new SettingsStore(folder);
             var migrated = Json.Read<AppSettings>(File.ReadAllText(file));
             Assert(migrated.SchemaVersion == AppSettings.CurrentSchemaVersion && migrated.BaseUrl == AppSettings.DefaultBaseUrl && migrated.Model == AppSettings.DefaultModel &&
-                migrated.ApiKey == encrypted && store.Key() == "migration-fake-key" && migrated.ReasoningEffort == "max" &&
+                migrated.ApiKey == "" && migrated.ApiKeys.Count == 1 && migrated.ApiKeys[0].Key == encrypted && store.Key() == "migration-fake-key" && migrated.ReasoningEffort == "max" &&
                 migrated.Temperature == .7 && migrated.TopP == .8 && migrated.MaxTokens == 4096 && !migrated.Thinking && migrated.SystemPrompt == "keep prompt" && migrated.Window?.X == 10, "Migration lost settings/key");
             store.Value.BaseUrl = "https://api.friendli.ai/serverless/v1"; store.Value.Model = "LGAI-EXAONE/K-EXAONE-2.0-750B-A37B"; store.Save();
             var reopened = new SettingsStore(folder);
@@ -362,6 +362,71 @@ internal static class SelfTest
             store.Value.Theme = "invalid"; var rejected = false;
             try { SettingsStore.Validate(store.Value); } catch (InvalidOperationException) { rejected = true; }
             Assert(rejected, "Invalid theme accepted"); return Task.CompletedTask;
+        });
+        AppSettings Rotated(string mode, params string[] keys) { var s = Settings(mode); s.ApiKeys = keys.Select(key => new ApiKeyEntry { Key = SettingsStore.Protect(key) }).ToList(); return s; }
+        await Test("429 headers rotate before stream and persist key metadata", async () =>
+        {
+            var s = Rotated("separate", "limited", "mock-key"); var c = new Conversation(); ChatHistory.Prepare(c, "keys", false);
+            using var cancel = new CancellationTokenSource(); var run = new Generation(c, s, cancel);
+            await run.Run(api, new ConversationStore(root), (_, _, _) => { });
+            Assert(run.Error is null && c.Messages[^1].KeyIndex == 2 && c.Messages[^1].KeyFailover is [{ Index: 1, Status: 429, RetryAfterSec: 3 }], "Failover metadata missing");
+            Assert(new ConversationStore(root).Get(c.Id).Messages[^1].KeyIndex == 2, "Key metadata not saved");
+        });
+        await Test("cooling keys skipped and connection check rotates", async () =>
+        {
+            var s = Rotated("separate", "limited", "mock-key"); KeyRotation.Pause(s.ApiKeys[0].Key, 60); var trace = new KeyTrace();
+            await api.Check(s, "", default, trace);
+            Assert(trace.KeyIndex == 2 && trace.KeyFailover[0].RetryAfterSec > 50, "Cooling key was requested");
+        });
+        await Test("all 429 retains rate limit and earliest retry", async () =>
+        {
+            var s = Rotated("separate", "limited", "limited"); var trace = new KeyTrace();
+            try { await api.Check(s, "", default, trace); throw new Exception("Expected 429"); }
+            catch (ApiException ex) { Assert(ex.Status == 429 && ex.Message.Contains("등록된 키 2개가 모두 한도 초과") && ex.Message.Contains("3초 후") && trace.KeyFailover.Count == 2, "All-key error mismatch"); }
+        });
+        await Test("401 and 403 do not rotate", async () =>
+        {
+            foreach (var mode in new[] { "separate", "forbidden" })
+            {
+                var s = Rotated(mode, "bad", "mock-key"); var trace = new KeyTrace();
+                try { await api.Check(s, "", default, trace); throw new Exception("Expected auth error"); }
+                catch (ApiException ex) { Assert(ex.Status is 401 or 403 && trace.KeyIndex == 1 && trace.KeyFailover.Count == 0, "Auth key silently skipped"); }
+            }
+        });
+        await Test("no failover after streaming has started", async () =>
+        {
+            var s = Rotated("aftererror", "mock-key", "mock-key"); var trace = new KeyTrace(); var text = "";
+            try { await api.Stream(s, "", [new() { Content = "test" }], (_, delta) => text += delta, default, trace: trace); throw new Exception("Expected stream error"); }
+            catch (ApiException) { Assert(text == "partial" && trace.KeyIndex == 1 && trace.KeyFailover.Count == 0, "Stream was retried"); }
+        });
+        await Test("HTTP 500 never rotates to another key", async () =>
+        {
+            var s = Rotated("servererror", "mock-key", "mock-key"); var trace = new KeyTrace();
+            try { await api.Check(s, "", default, trace); throw new Exception("Expected HTTP 500"); }
+            catch (ApiException ex) { Assert(ex.Status == 500 && trace.KeyIndex == 1 && trace.KeyFailover.Count == 0, "Server error switched keys"); }
+        });
+        await Test("search query planner shares key failover", async () =>
+        {
+            var s = Rotated("separate", "limited", "mock-key"); var trace = new KeyTrace();
+            var queries = await SearchService.Plan(api, s, "", [], "question", default, trace);
+            Assert(queries[0] == "question" && trace.KeyIndex == 2 && trace.KeyFailover.Count == 1, "Planner did not rotate");
+        });
+        await Test("schema one key migrates once with same ciphertext", () =>
+        {
+            var folder = Path.Combine(root, "keys-migrate"); var encrypted = SettingsStore.Protect("fake-old-secret");
+            AtomicFile.Write(Path.Combine(folder, "settings.json"), new { schemaVersion = 1, apiKey = encrypted });
+            var store = new SettingsStore(folder); Assert(store.Value.ApiKeys is [{ Label: "" }] && store.Value.ApiKeys[0].Key == encrypted && store.Key() == "fake-old-secret", "Legacy key lost");
+            store.Value.ApiKeys[0].Label = "first"; store.Save(); var reopened = new SettingsStore(folder);
+            Assert(reopened.Value.ApiKeys.Count == 1 && reopened.Value.ApiKeys[0].Label == "first" && !SettingsStore.Migrate(reopened.Value), "Migration repeated"); return Task.CompletedTask;
+        });
+        await Test("JS key summaries contain no plaintext or ciphertext", () =>
+        {
+            var store = new SettingsStore(Path.Combine(root, "keys-public")); store.Value.ApiKeys = Rotated("separate", "fake-key-one-1234", "fake-key-two-5678").ApiKeys; store.Save();
+            var json = Json.Serialize(store.Public()); Assert(json.Contains("1234") && json.Contains("5678") && !json.Contains("fake-key-") && store.Value.ApiKeys.All(k => !json.Contains(k.Key)), "Key leaked to JS"); return Task.CompletedTask;
+        });
+        await Test("Retry-After seconds, HTTP date, missing and invalid", () =>
+        {
+            var now = DateTimeOffset.UtcNow; Assert(KeyRotation.RetrySeconds("3") == 3 && KeyRotation.RetrySeconds(null) == 60 && KeyRotation.RetrySeconds("invalid") == 60 && KeyRotation.RetrySeconds(now.AddSeconds(10).ToString("r"), now) is >= 9 and <= 10, "Retry-After parse mismatch"); return Task.CompletedTask;
         });
         var report = Path.Combine(AppContext.BaseDirectory, "tools", "selftest-results.json");
         AtomicFile.Write(report, new { passed = failures == 0, tests = results });

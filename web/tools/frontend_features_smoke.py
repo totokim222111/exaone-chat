@@ -30,6 +30,8 @@ def panel(page):
 
 
 def save(page):
+    if page.locator('#apiKey').input_value():
+        api(page, '/api/key', 'DELETE')
     page.locator("#saveSettings").click()
     expect(page.locator("#saveResult")).to_contain_text("저장됨")
     page.locator("#closeSettings").click()

@@ -12,12 +12,13 @@ internal static class Json
 
 internal sealed class AppSettings
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
     public const string DefaultBaseUrl = "https://api.exaone.ai/v1";
     public const string DefaultModel = "k-exaone_v2.5";
     // Missing in legacy JSON: leave at zero so SettingsStore can migrate once.
     public int SchemaVersion { get; set; }
     public string ApiKey { get; set; } = ""; // DPAPI ciphertext only.
+    public List<ApiKeyEntry> ApiKeys { get; set; } = [];
     public string BaseUrl { get; set; } = DefaultBaseUrl;
     public string Model { get; set; } = DefaultModel;
     public string SystemPrompt { get; set; } = "";
@@ -48,6 +49,8 @@ internal sealed class ChatMessage
     public string? ReasoningEffort { get; set; }
     public SearchMetadata? Search { get; set; }
     public MessageTiming? Timing { get; set; }
+    public int? KeyIndex { get; set; }
+    public List<KeyFailover>? KeyFailover { get; set; }
 }
 internal sealed record ChatUsage(long? PromptTokens, long? CompletionTokens, long? ReasoningTokens);
 internal sealed record SearchSource(int N, string Title, string Url, string Domain, string Snippet);

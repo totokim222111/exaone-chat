@@ -90,6 +90,9 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             return self.reply(400, {"error": {"message": "Invalid JSON"}})
         key = self.headers.get("Authorization", "").removeprefix("Bearer ")
+        if key == 'limited':
+            data = b'{"error":{"message":"Rate limit"}}'
+            self.send_response(429); self.send_header('Retry-After', '3'); self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
         if key not in ("good", "think", "slow", "svg"):
             return self.reply(401, {"result_code": "40100", "description": "Invalid API key"})
         # Enforce important outbound contract properties during smoke runs.

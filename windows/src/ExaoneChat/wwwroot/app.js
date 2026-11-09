@@ -80,6 +80,14 @@
     serverAvailable: () => state.settings.search ? state.settings.search.serverProvider === 'searxng' : !!state.settings.searxngUrl,
     check: async () => { return request('search.test', settingsPayload()); }, changed: updateSettingsSummary
   });
+  const keyUI = ExaKeys.create({
+    list: () => request('keys.list'),
+    add: async value => { const added = await request('keys.add', { ...settingsPayload(), newApiKey: '', ...value }); state.deletingKey = false; $('deleteKey').textContent = '키 삭제'; return added; },
+    patch: (key, value) => request('keys.patch', { index: key.index, ...value }),
+    remove: key => request('keys.delete', { index: key.index }),
+    test: key => request('keys.test', { ...settingsPayload(), newApiKey: '', index: key.index }),
+    changed: keys => { state.settings.keys = keys; state.settings.hasKey = !!keys.length; state.settings.keySuffix = keys[0]?.last4 || ''; updateSettingsSummary(); }
+  });
   function updateSettingsSummary() {
     const s = state.settings;
     $('keyStatus').classList.toggle('connected', s.hasKey);
@@ -277,8 +285,10 @@
     $('deleteKey').textContent = '키 삭제'; $('deleteKey').disabled = !s.hasKey;
     $('saveResult').textContent = ''; $('connectionResult').replaceChildren();
     $('settingsOverlay').hidden = false; closeSidebar(); $('settingsPanel').focus();
+    keyUI.refresh();
   }
   function closeSettings() {
+    keyUI.clear();
     searchSettings.clearSecrets();
     $('apiKey').value = ''; $('settingsOverlay').hidden = true;
     state.lastFocus?.focus();
@@ -295,11 +305,13 @@
   async function saveSettings(event) {
     event.preventDefault(); $('saveSettings').disabled = true;
     try {
+      if (keyUI.pending() && !await keyUI.addInput()) throw new Error('키를 추가하지 못했습니다. 위 사유를 확인해 주세요.');
       state.settings = await request('settings.save', settingsPayload());
       $('apiKey').value = ''; $('apiKey').placeholder = state.settings.hasKey ? `저장됨 ••••${state.settings.keySuffix}` : 'API 키 입력';
       state.deletingKey = false; $('deleteKey').textContent = '키 삭제'; $('deleteKey').disabled = !state.settings.hasKey;
       $('keyNote').textContent = state.settings.hasKey ? '빈칸으로 저장하면 기존 키를 유지합니다.' : '이 Windows 계정에서 암호화해 저장합니다.';
       searchSettings.refresh();
+      keyUI.refresh();
       $('saveResult').textContent = `저장됨 · ${time(new Date())}`; updateSettingsSummary();
     } catch (error) { $('saveResult').textContent = errorMessage(error); }
     finally { $('saveSettings').disabled = false; }
@@ -311,7 +323,7 @@
       await request('connection.check', settingsPayload());
       const status = make('span', 'status connected'); status.append(make('i'), '연결됨'); $('connectionResult').replaceChildren(status);
     } catch (error) { $('connectionResult').replaceChildren(make('span', 'tag', '실패'), make('span', '', errorMessage(error))); }
-    finally { $('checkConnection').disabled = false; }
+    finally { $('checkConnection').disabled = false; keyUI.refresh(); }
   }
   $('conversationSearch').addEventListener('input', renderList);
   $('newChat').addEventListener('click', newConversation);
@@ -366,7 +378,7 @@
 
   function createPreviewBridge() {
     const now = new Date().toISOString();
-    let settings = { ...defaults, hasKey: true, keySuffix: '4821' };
+    let settings = { ...defaults, hasKey: true, keySuffix: '4821', keys: [{ index: 1, label: '', last4: '4821', coolingSec: 0 }] };
     const example = "# 안녕하세요\n\n**EXAONE** mock 응답입니다. `코드`와 [API 문서](https://docs.exaone.ai)를 함께 볼 수 있습니다.\n\n에너지 관계는 $E = mc^2$ 입니다.\n\n$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$\n\n```python\ndef hello(name):\n    return f\"안녕하세요, {name}님.\"\n\nprint(hello(\"EXAONE\"))\n```\n\n```svg\n<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 480 180\"><rect width=\"480\" height=\"180\" fill=\"#DCE6DF\"/><path d=\"M40 140L160 70L280 110L420 35\" fill=\"none\" stroke=\"#5F8570\" stroke-width=\"6\"/><text x=\"40\" y=\"40\" fill=\"#123527\" font-size=\"20\">EXAONE</text></svg>\n```\n\n```markdown\n## 작은 시작\n\n**목표**를 적고 `한 단계`씩 진행하세요.\n\n- 질문 정리\n- 결과 확인\n```\n\n| 단계 | 할 일 |\n| --- | --- |\n| 정리 | 목표와 조건 확인 |\n| 구현 | 작은 기능부터 완성 |\n| 검증 | 실제 흐름으로 확인 |\n\n> 좋은 시작은 다음 행동이 분명한 시작입니다.";
     const items = [
       { id: 'preview-1', title: '생각을 코드로 옮기기', createdAt: now, updatedAt: now, model: defaults.model, messages: [{ role: 'user', content: '새로운 프로젝트를 시작할 때 어떻게 접근하면 좋을까요?', createdAt: now }, { role: 'assistant', reasoningEffort: 'max', content: example, usage: { promptTokens: 42, completionTokens: 567, reasoningTokens: 1234 }, reasoning: '질문에서 시작 단계의 막막함을 먼저 살펴봅니다.\n목표를 작게 나누고 바로 실행할 수 있는 흐름으로 정리합니다.', createdAt: now }] },
@@ -387,14 +399,28 @@
         switch (type) {
           case 'saveFile': reply(ExaRender.download(p.name, p.mime, p.text)); break;
           case 'settings.get': reply(settings); break;
+          case 'keys.list': reply(settings.keys); break;
+          case 'keys.add':
+            if (settings.keys.length >= 5) throw { message: 'API 키는 5개까지 등록할 수 있습니다.' };
+            if (p.apiKey === 'bad') throw { message: authGuidance, status: 401 };
+            settings.keys.push({ index: settings.keys.length + 1, label: p.label, last4: p.apiKey.slice(-4), coolingSec: p.apiKey === 'limited' ? 3 : 0 });
+            settings.hasKey = true; settings.keySuffix = settings.keys[0].last4; reply({ keys: settings.keys, warning: p.apiKey === 'limited' ? '429 · 키를 등록했습니다.' : null }); break;
+          case 'keys.patch':
+          case 'keys.delete': {
+            const key = settings.keys[p.index - 1]; if (!key) throw { message: '키를 찾을 수 없습니다.' };
+            if (type === 'keys.delete') settings.keys.splice(p.index - 1, 1);
+            else { if (p.label !== undefined) key.label = p.label; if (p.position !== undefined) { settings.keys.splice(p.index - 1, 1); settings.keys.splice(p.position - 1, 0, key); } }
+            settings.keys.forEach((key, index) => key.index = index + 1); settings.hasKey = !!settings.keys.length; settings.keySuffix = settings.keys[0]?.last4 || ''; reply({ keys: settings.keys }); break;
+          }
+          case 'keys.test': reply({ ok: settings.keys[p.index - 1]?.last4 !== 'ited', message: settings.keys[p.index - 1]?.last4 === 'ited' ? 'HTTP 429 · 한도 초과' : '연결됨' }); break;
           case 'theme.set': settings.theme = p.theme; reply({ theme: p.theme }); break;
           case 'settings.save': {
             validate(p);
             const { newApiKey, deleteKey, tavilyKey, braveKey, ...safe } = p;
             for (const [name, value] of [['tavily', tavilyKey], ['brave', braveKey]]) if (value !== undefined) settings.searchKeys[name] = { hasKey: !!value, last4: value.slice(-4) };
             settings = { ...settings, ...safe };
-            if (deleteKey) { settings.hasKey = false; settings.keySuffix = ''; }
-            if (newApiKey) { settings.hasKey = true; settings.keySuffix = newApiKey.slice(-4); }
+            if (deleteKey) { settings.hasKey = false; settings.keySuffix = ''; settings.keys = []; }
+            if (newApiKey) { settings.hasKey = true; settings.keySuffix = newApiKey.slice(-4); const entry = { index: 1, label: settings.keys[0]?.label || '', last4: newApiKey.slice(-4), coolingSec: 0 }; if (settings.keys.length) settings.keys[0] = entry; else settings.keys.push(entry); }
             reply(settings); break;
           }
           case 'search.test': reply({ ok: true, provider: p.searchProvider === 'auto' ? 'searxng' : p.searchProvider, resultCount: 8, latencyMs: 900, message: '검색을 확인했습니다.' }); break;
@@ -427,6 +453,10 @@
             const active = { stopped: false }; streams.set(c.id, active);
             emit('start', { conversation: c });
             try {
+              const failed = snapshot.keys.filter(key => key.last4 === 'ited');
+              const used = snapshot.keys.find(key => key.last4 !== 'ited');
+              if (!used) throw { status: 429, message: `등록된 키 ${snapshot.keys.length}개가 모두 한도 초과 · 가장 빠른 재시도 3초 후` };
+              answer.keyIndex = used.index; if (failed.some(key => key.index < used.index)) answer.keyFailover = failed.filter(key => key.index < used.index).map(key => ({ index: key.index, status: 429, retryAfterSec: 3 }));
               const started = Date.now(); let reasonAt, answerAt, firstAt, searchMs = null;
               if (selected.webSearch) {
                 const queries = [c.messages.at(-2).content, 'EXAONE 공식 문서'];

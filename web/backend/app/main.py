@@ -23,7 +23,8 @@ from .config import (ALLOWED, COOKIE_SECURE, CUSTOM, DEFAULTS, DEFAULT_BASE_URL,
 from .crypto import KeyCipher, load_secret
 from .models import (CreateConversation, EditMessageInput, KeyInput, MessageInput, RenameConversation, RetryInput,
                      SearchKeysInput, SearchTestInput, SettingsInput)
-from . import search_pipeline
+from . import search_pipeline, key_store, keys_api
+from .key_rotation import KeySet, Exhausted, PlannerError
 from .security import RequestGuard, validation_status
 from .streaming import EventResponse, LeadingWhitespaceTrimmer, ThinkSplitter, event
 from .upstream import UpstreamError, deltas, test_key
@@ -96,8 +97,8 @@ def settings(client):
     return DEFAULTS | client["settings"]
 
 
-def me(client):
-    return dict(hasKey=client["api_key_enc"] is not None, keyLast4=client["api_key_last4"],
+async def me(client):
+    return dict(keys=await key_store.summary(app.state.pool, client["id"]), hasKey=client["api_key_enc"] is not None, keyLast4=client["api_key_last4"],
                 settings=settings(client), searchKeys=search_key_summary(client))
 
 
@@ -140,7 +141,7 @@ def message(row):
             "reasoning": row["reasoning"], "error": row["error"], "stopped": row["stopped"],
             "usage": row["usage"], "reasoningEffort": row["reasoning_effort"],
             "search": row["search"],
-            "timing": row["timing"], "attachments": row.get("attachments", []),
+            "timing": row["timing"], "keyIndex": row.get("key_index"), "keyFailover": row.get("key_failover"), "attachments": row.get("attachments", []),
             "createdAt": timestamp(row["created_at"])}
 
 
@@ -200,7 +201,7 @@ async def health():
 @app.get("/api/config")
 async def config(request: Request):
     if access.username() and await access.grant_for(request) is None:
-        return dict(defaultBaseUrl="", allowedBaseUrls=[], allowCustomBaseUrl=False,
+        return dict(httpsOnly=COOKIE_SECURE, defaultBaseUrl="", allowedBaseUrls=[], allowCustomBaseUrl=False,
             defaultModel="", models=[], exaoneStyleHosts=[], reasoningEfforts=REASONING_EFFORTS,
             defaultReasoningEffort="max", limits=dict(maxMessageChars=32000, maxSystemPromptChars=8000),
             search=dict(available=False, serverProvider=None, providers=search_pipeline.PROVIDERS))
@@ -215,7 +216,7 @@ async def config(request: Request):
             has_keys = any(client[name + "_key_enc"] for name in ("tavily", "brave"))
         except ApiError:
             pass
-    return dict(defaultBaseUrl=DEFAULT_BASE_URL, allowedBaseUrls=ALLOWED, allowCustomBaseUrl=CUSTOM,
+    return dict(httpsOnly=COOKIE_SECURE, defaultBaseUrl=DEFAULT_BASE_URL, allowedBaseUrls=ALLOWED, allowCustomBaseUrl=CUSTOM,
                 defaultModel=DEFAULT_MODEL, models=MODELS, exaoneStyleHosts=EXAONE_STYLE_HOSTS,
                 reasoningEfforts=REASONING_EFFORTS, defaultReasoningEffort="max",
                 search=dict(available=bool(ready or has_keys), serverProvider="searxng" if ready else None,
@@ -227,13 +228,13 @@ async def config(request: Request):
 async def session(request: Request):
     try:
         client = await current_client(request)
-        return me(client)
+        return await me(client)
     except ApiError:
         token = secrets.token_urlsafe(32)
         client = await app.state.pool.fetchrow(
             "INSERT INTO clients(id, token_hash) VALUES($1,$2) RETURNING *",
             uuid.uuid4(), hashlib.sha256(token.encode()).digest())
-        response = JSONResponse(me(client))
+        response = JSONResponse(await me(client))
         response.set_cookie("exa_sid", token, max_age=365 * 24 * 3600, httponly=True,
                             secure=COOKIE_SECURE, samesite="lax", path="/")
         return response
@@ -241,31 +242,7 @@ async def session(request: Request):
 
 @app.get("/api/me")
 async def get_me(client=Depends(current_client)):
-    return me(client)
-
-
-@app.put("/api/key")
-async def put_key(body: KeyInput, client=Depends(current_client)):
-    if body.verify:
-        result = await test_key(app.state.http, settings(client), body.apiKey)
-        if not result["ok"]:
-            raise ApiError(400, "key_invalid", result["message"])
-    await app.state.pool.execute("UPDATE clients SET api_key_enc=$1, api_key_last4=$2 WHERE id=$3",
-                                 app.state.cipher.encrypt(body.apiKey), body.apiKey[-4:], client["id"])
-    return dict(hasKey=True, keyLast4=body.apiKey[-4:], verified=body.verify)
-
-
-@app.delete("/api/key")
-async def delete_key(client=Depends(current_client)):
-    await app.state.pool.execute("UPDATE clients SET api_key_enc=NULL, api_key_last4=NULL WHERE id=$1", client["id"])
-    return dict(hasKey=False)
-
-
-@app.post("/api/key/test")
-async def key_test(client=Depends(current_client)):
-    if not client["api_key_enc"]:
-        raise ApiError(400, "no_key", "API 키를 먼저 저장해 주세요.")
-    return await test_key(app.state.http, settings(client), app.state.cipher.decrypt(client["api_key_enc"]))
+    return await me(client)
 
 
 @app.put("/api/settings")
@@ -405,7 +382,7 @@ async def prepare(cid, client, content=None, retry=False, edit_id=None, override
         history = attachments.build_history(rows, files, user["id"])
         if cfg["systemPrompt"]:
             history.insert(0, {"role": "system", "content": cfg["systemPrompt"]})
-        key = app.state.cipher.decrypt(client["api_key_enc"]) if client["api_key_enc"] else None
+        key = KeySet(await key_store.load(app.state.pool, app.state.cipher, client["id"]))
         credentials = search_credentials(client) if cfg["webSearch"] else {}
         return EventResponse(lambda q: generate(q, cid, client["id"], user, cfg, key, history, retry, credentials, started),
                              lambda: app.state.active.discard(cid))
@@ -478,6 +455,8 @@ async def generate(queue, cid, client_id, user, cfg, key, history, retry, search
             search["error"] = "검색이 완료되기 전에 중지되었습니다."
         for kind, text in splitter.feed("", final=True):
             collect(kind, text)
+    except (Exhausted, PlannerError) as exc:
+        failure = dict(kind="rate_limit" if exc.status == 429 else "auth", status=exc.status, message=str(exc))
     except UpstreamError as exc:
         failure = exc.data()
         for kind, text in splitter.feed("", final=True):
@@ -488,9 +467,9 @@ async def generate(queue, cid, client_id, user, cfg, key, history, retry, search
     async def persist():
         async with app.state.pool.acquire() as conn:
             async with conn.transaction():
-                saved = await conn.fetchrow("INSERT INTO messages(id,conversation_id,seq,role,content,reasoning,error,stopped,usage,reasoning_effort,search,timing) SELECT $1,c.id,$2,'assistant',$3,$4,$5,$6,$7,$8,$9,$10 FROM conversations c WHERE c.id=$11 AND c.client_id=$12 RETURNING *",
+                saved = await conn.fetchrow("INSERT INTO messages(id,conversation_id,seq,role,content,reasoning,error,stopped,usage,reasoning_effort,search,timing,key_index,key_failover) SELECT $1,c.id,$2,'assistant',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12 FROM conversations c WHERE c.id=$13 AND c.client_id=$14 RETURNING *",
                     uuid.uuid4(), user["seq"] + 1, "".join(parts["content"]), "".join(parts["reasoning"]), failure, stopped, usage,
-                    cfg["reasoningEffort"] if is_exaone_style(cfg["baseUrl"]) else None, search, timing, cid, client_id)
+                    cfg["reasoningEffort"] if is_exaone_style(cfg["baseUrl"]) else None, search, timing, key.trace.get("keyIndex") if isinstance(key, KeySet) else None, key.trace.get("keyFailover") if isinstance(key, KeySet) else None, cid, client_id)
                 await conn.execute("UPDATE conversations SET updated_at=now() WHERE id=$1 AND client_id=$2", cid, client_id)
                 conv = await owned(conn, cid, client_id) if saved is not None else None
         return saved, conv
@@ -530,3 +509,4 @@ async def edit_message(cid: uuid.UUID, message_id: uuid.UUID, body: EditMessageI
 
 features.register(app, current_client, ApiError, conversation, message, owned, timestamp)
 access.register(app)
+keys_api.register(app, current_client, ApiError, settings)

@@ -39,18 +39,21 @@ internal sealed class SettingsStore
     internal static bool Migrate(AppSettings value)
     {
         if (value.SchemaVersion >= AppSettings.CurrentSchemaVersion) return false;
-        if (value.BaseUrl == "https://api.friendli.ai/serverless/v1" && value.Model == "LGAI-EXAONE/K-EXAONE-2.0-750B-A37B")
+        if (value.SchemaVersion < 1 && value.BaseUrl == "https://api.friendli.ai/serverless/v1" && value.Model == "LGAI-EXAONE/K-EXAONE-2.0-750B-A37B")
         {
             value.BaseUrl = AppSettings.DefaultBaseUrl;
             value.Model = AppSettings.DefaultModel;
         }
+        if (value.ApiKeys.Count == 0 && value.ApiKey.Length > 0) value.ApiKeys.Add(new() { Key = value.ApiKey });
+        value.ApiKey = "";
         value.SchemaVersion = AppSettings.CurrentSchemaVersion;
         return true;
     }
     public string Key()
     {
-        if (Value.ApiKey.Length == 0) return "";
-        try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(Value.ApiKey), null, DataProtectionScope.CurrentUser)); }
+        var encoded = Value.ApiKeys.FirstOrDefault()?.Key ?? Value.ApiKey;
+        if (encoded.Length == 0) return "";
+        try { return Reveal(encoded); }
         catch (Exception ex) when (ex is CryptographicException or FormatException)
         { throw new InvalidOperationException("저장된 키를 복호화할 수 없습니다. 설정에서 키를 다시 입력하세요."); }
     }
@@ -61,7 +64,7 @@ internal sealed class SettingsStore
         try { key = Key(); } catch { key = ""; }
         return new { hasKey = key.Length > 0, keySuffix = key.Length > 0 ? key[^Math.Min(4, key.Length)..] : "",
             s.BaseUrl, s.Model, s.SystemPrompt, s.Temperature, s.TopP, s.MaxTokens, s.Thinking, s.ReasoningEffort,
-            s.WebSearch, s.SearchProvider, s.SearxngUrl, s.Theme,
+            s.WebSearch, s.SearchProvider, s.SearxngUrl, s.Theme, keys = Keys(s),
             searchKeys = new { tavily = KeySummary(s.TavilyKey), brave = KeySummary(s.BraveKey) },
             search = new { available = SearchService.ChooseProvider(s.SearchProvider, s.TavilyKey.Length > 0, s.BraveKey.Length > 0, serverReady == false ? "" : s.SearxngUrl) is not null,
                 serverProvider = serverReady != false && s.SearxngUrl.Length > 0 ? "searxng" : null, providers = new[] { "searxng", "tavily", "brave" } } };
@@ -84,17 +87,20 @@ internal sealed class SettingsStore
         if (input.TryGetProperty("tavilyKey", out var tavily)) s.TavilyKey = Protect(tavily.GetString() ?? "");
         if (input.TryGetProperty("braveKey", out var brave)) s.BraveKey = Protect(brave.GetString() ?? "");
         Validate(s);
-        if (input.TryGetProperty("deleteKey", out var del) && del.GetBoolean()) s.ApiKey = "";
+        if (input.TryGetProperty("deleteKey", out var del) && del.GetBoolean()) { s.ApiKey = ""; s.ApiKeys.Clear(); }
         if (input.TryGetProperty("newApiKey", out var value) && !string.IsNullOrWhiteSpace(value.GetString()))
         {
             var key = value.GetString()!.Trim();
             if (key.Any(char.IsControl)) throw new InvalidOperationException("API 키 형식을 확인하세요.");
-            s.ApiKey = Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(key), null, DataProtectionScope.CurrentUser));
+            var entry = new ApiKeyEntry { Key = Protect(key), Label = s.ApiKeys.FirstOrDefault()?.Label ?? "" };
+            if (s.ApiKeys.Count == 0) s.ApiKeys.Add(entry); else s.ApiKeys[0] = entry;
+            s.ApiKey = "";
         }
         return s;
     }
     public static void Validate(AppSettings s)
     {
+        if (s.ApiKeys.Count > 5 || s.ApiKeys.Any(k => k.Label.Length > 30)) throw new InvalidOperationException("키는 5개, 라벨은 30자까지 등록할 수 있습니다.");
         if (s.Theme is not ("light" or "dark" or "system")) throw new InvalidOperationException("화면 모드를 확인하세요.");
         if (!Uri.TryCreate(s.BaseUrl, UriKind.Absolute, out var uri) ||
             (uri.Scheme != "https" && !(uri.Scheme == "http" && uri.IsLoopback)) ||
@@ -121,7 +127,8 @@ internal sealed class SettingsStore
         try { var key = Reveal(ciphertext); return new { hasKey = key.Length > 0, last4 = key[^Math.Min(4, key.Length)..] }; }
         catch { return new { hasKey = false, last4 = "" }; }
     }
-    public static string Decrypt(AppSettings s) => s.ApiKey.Length == 0 ? "" : Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(s.ApiKey), null, DataProtectionScope.CurrentUser));
+    public static string Decrypt(AppSettings s) => Reveal(s.ApiKeys.FirstOrDefault()?.Key ?? s.ApiKey);
+    public static object[] Keys(AppSettings s) => s.ApiKeys.Select((entry, index) => { string key; try { key = Reveal(entry.Key); } catch { key = ""; } return (object)new { index = index + 1, entry.Label, last4 = key[^Math.Min(4, key.Length)..], coolingSec = KeyRotation.Remaining(entry.Key) }; }).ToArray();
     public void Save(AppSettings? value = null)
     {
         var next = value ?? Value;

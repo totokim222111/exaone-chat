@@ -45,10 +45,11 @@ internal sealed class SearchService : IDisposable
         else { body["chat_template_kwargs"] = new { enable_thinking = false }; if (host.Equals("api.friendli.ai", StringComparison.OrdinalIgnoreCase)) body["parse_reasoning"] = true; }
         return body;
     }
-    internal static async Task<List<string>> Plan(ApiClient api, AppSettings s, string key, IEnumerable<ChatMessage> history, string question, CancellationToken ct)
+    internal static async Task<List<string>> Plan(ApiClient api, AppSettings s, string key, IEnumerable<ChatMessage> history, string question, CancellationToken ct, KeyTrace? trace = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromSeconds(30));
-        try { return ParseQueries(await api.Complete(s, key, QueryBody(s, history, question, new Uri(s.BaseUrl).Host), timeout.Token), question); }
+        try { return ParseQueries(await api.Complete(s, key, QueryBody(s, history, question, new Uri(s.BaseUrl).Host), timeout.Token, trace), question); }
+        catch (ApiException ex) when (ex.Status is 401 or 403 or 429) { throw; }
         catch (Exception) when (!ct.IsCancellationRequested) { return ParseQueries("", question); }
     }
     internal static string? ChooseProvider(string provider, bool tavily, bool brave, string url)

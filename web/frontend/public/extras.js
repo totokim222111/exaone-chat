@@ -9,6 +9,10 @@
     const before = node.textContent; node.textContent = '복사됨'; clearTimeout(node._copied); node._copied = setTimeout(() => { node.textContent = before; }, 1500);
   }
   function failure(container, error) { container.replaceChildren(make('span', 'tag', '오류'), document.createTextNode(' ' + (error.message || '요청을 처리할 수 없습니다.'))); }
+  function enforceHttps(config) {
+    if (config.httpsOnly && location.protocol === 'http:') { location.replace('https://' + location.host + location.pathname + location.search + location.hash); return true; }
+    return false;
+  }
   async function publicView(token) {
     document.body.className = 'public-share';
     document.body.replaceChildren();
@@ -22,6 +26,9 @@
     const footer = make('footer', 'public-footer'); const start = make('a', '', '나도 써 보기'); start.href = '/'; footer.append(make('span', '', 'EXAONE Chat 으로 만든 대화'), start);
     scroll.append(header, empty, list, footer); main.append(scroll, jump, exportButton); document.body.append(main);
     try {
+      const config = await fetch('/api/config', { credentials: 'omit' });
+      if (!config.ok) throw { status: config.status };
+      if (enforceHttps(await config.json())) return;
       const response = await fetch('/api/public/shares/' + encodeURIComponent(token), { credentials: 'omit' });
       if (!response.ok) throw { status: response.status };
       const snapshot = await response.json(); const c = { ...snapshot, id: 'public:' + token, messages: snapshot.messages.map(message => ({ ...message, reasoning: undefined })) };
@@ -172,5 +179,5 @@
       changed() { $('shareChat').disabled = !options.ready() || !options.current() || options.current().local || !options.current().messages.length; if (share.matches(':popover-open') && shareFor !== options.current()?.id) { ++shareVersion; share.hidePopover(); } }
     };
   }
-  window.WebExtras = Object.freeze({ create, publicView });
+  window.WebExtras = Object.freeze({ create, publicView, enforceHttps });
 })();

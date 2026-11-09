@@ -144,6 +144,41 @@ internal sealed class MainForm : Form
                     }
                     break;
                 case "settings.get": Reply(reqId, await PublicSettings()); break;
+                case "keys.list": Reply(reqId, SettingsStore.Keys(settings.Value)); break;
+                case "keys.add":
+                    if (settings.Value.ApiKeys.Count >= 5) throw new InvalidOperationException("API 키는 5개까지 등록할 수 있습니다.");
+                    var newKey = p.GetProperty("apiKey").GetString()?.Trim() ?? "";
+                    if (newKey.Length == 0) throw new InvalidOperationException("키를 입력하세요.");
+                    var label = p.GetProperty("label").GetString() ?? "";
+                    if (label.Length > 30) throw new InvalidOperationException("라벨은 30자까지 입력할 수 있습니다.");
+                    var keyEntry = new ApiKeyEntry { Key = SettingsStore.Protect(newKey), Label = label };
+                    var keyDraft = settings.Draft(p); keyDraft.ApiKeys = [keyEntry]; keyDraft.ApiKey = "";
+                    string? warning = null;
+                    try { await api.Check(keyDraft, newKey, lifetime.Token); }
+                    catch (ApiException limited) when (limited.Status == 429) { warning = limited.Message; }
+                    if (settings.Value.ApiKeys.Count >= 5) throw new InvalidOperationException("API 키는 5개까지 등록할 수 있습니다.");
+                    settings.Value.ApiKeys.Add(keyEntry); settings.Save();
+                    Reply(reqId, new { keys = SettingsStore.Keys(settings.Value), warning }); break;
+                case "keys.patch":
+                case "keys.delete":
+                case "keys.test":
+                    var keyIndex = p.GetProperty("index").GetInt32() - 1;
+                    if (keyIndex < 0 || keyIndex >= settings.Value.ApiKeys.Count) throw new InvalidOperationException("키를 찾을 수 없습니다.");
+                    var existingKey = settings.Value.ApiKeys[keyIndex];
+                    if (type == "keys.test")
+                    {
+                        var testDraft = settings.Draft(p); testDraft.ApiKeys = [existingKey]; testDraft.ApiKey = "";
+                        try { await api.Check(testDraft, SettingsStore.Reveal(existingKey.Key), lifetime.Token); Reply(reqId, new { ok = true, message = "연결됨" }); }
+                        catch (ApiException checkError) { Reply(reqId, new { ok = false, status = checkError.Status, message = checkError.Message }); }
+                        break;
+                    }
+                    if (type == "keys.delete") settings.Value.ApiKeys.RemoveAt(keyIndex);
+                    else
+                    {
+                        if (p.TryGetProperty("label", out var keyLabel)) { var value = keyLabel.GetString() ?? ""; if (value.Length > 30) throw new InvalidOperationException("라벨은 30자까지 입력할 수 있습니다."); existingKey.Label = value; }
+                        if (p.TryGetProperty("position", out var position)) { settings.Value.ApiKeys.RemoveAt(keyIndex); settings.Value.ApiKeys.Insert(Math.Clamp(position.GetInt32()-1, 0, settings.Value.ApiKeys.Count), existingKey); }
+                    }
+                    settings.Save(); Reply(reqId, new { keys = SettingsStore.Keys(settings.Value) }); break;
                 case "theme.set":
                     var theme = p.GetProperty("theme").GetString();
                     if (theme is not ("light" or "dark" or "system")) throw new InvalidOperationException("화면 모드를 확인하세요.");

@@ -42,6 +42,8 @@ class Handler(BaseHTTPRequestHandler):
             mode = self.path.strip('/').split('/')[0]
             if mode == 'unauthorized':
                 return self.json_response(401, {'error': {'message': 'invalid key mock-key'}})
+            if mode == 'servererror':
+                return self.json_response(500, {'error': {'message': 'mock server error'}})
             if mode == 'exaone401':
                 return self.json_response(401, {'result_code': 'UNAUTHORIZED', 'description': '공식 키 오류', 'message': 'fallback'})
             if mode == 'forbidden':
@@ -51,6 +53,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
+            if self.headers.get('Authorization') == 'Bearer limited':
+                data = b'{"error":{"message":"Rate limit"}}'
+                self.send_response(429); self.send_header('Retry-After', '3'); self.send_header('Content-Length', str(len(data))); self.end_headers(); self.wfile.write(data); return
+            if self.headers.get('Authorization') == 'Bearer bad':
+                return self.json_response(401, {'error': {'message': 'Invalid key'}})
             assert self.headers.get('Authorization') in ('Bearer mock-key', 'Bearer slow')
             assert self.headers.get('Content-Type', '').startswith('application/json')
             assert body['model'] == 'mock-exaone'
@@ -124,6 +131,9 @@ class Handler(BaseHTTPRequestHandler):
                 chunk(content='부분 응답')
                 time.sleep(3)
                 chunk(content='이 부분은 취소 뒤')
+            elif mode == 'aftererror':
+                chunk(content='partial')
+                self.wfile.write(b'data: {"error":{"message":"429 after streaming"}}\n\n'); self.wfile.flush()
             elif mode == 'disconnect':
                 chunk(content='받은 내용')
                 return

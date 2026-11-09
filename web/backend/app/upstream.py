@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 import httpx
 from .config import is_exaone_style, validate_base_url
 from .streaming import SSEParser
+from .key_rotation import rotating_response, Exhausted
 
 
 class UpstreamError(Exception):
@@ -69,14 +70,13 @@ def transport_error(exc):
 
 
 async def test_key(client, settings, key):
+    trace = getattr(key, "trace", {})
     start = time.monotonic()
     try:
         base = validate_base_url(settings["baseUrl"])
-        async with client.stream("POST", base + "/chat/completions",
-            headers={"Authorization": "Bearer " + key},
-            json=payload(settings, [{"role": "user", "content": "hi"}], False)) as response:
+        async with rotating_response(client, base + "/chat/completions", payload(settings, [{"role": "user", "content": "hi"}], False), key, trace=trace) as response:
             if not 200 <= response.status_code < 300:
-                raise await response_error(response, key)
+                raise await response_error(response, trace.get("_key", ""))
             if is_exaone_style(base):
                 if response.status_code != 200:
                     raise UpstreamError("upstream", response.status_code, "업스트림 키 확인 요청이 HTTP 200을 반환하지 않았습니다.")
@@ -95,6 +95,8 @@ async def test_key(client, settings, key):
                 raise UpstreamError("upstream", response.status_code, "업스트림 테스트 응답 형식이 올바르지 않습니다.") from None
             return dict(ok=True, status=response.status_code, message="API 키를 확인했습니다.",
                         latencyMs=round((time.monotonic() - start) * 1000))
+    except Exhausted as exc:
+        return dict(ok=False, status=429, message=str(exc), retryAfterSec=min((x["retryAfterSec"] for x in trace.get("keyFailover", [])), default=60), latencyMs=round((time.monotonic() - start) * 1000))
     except UpstreamError as exc:
         return dict(ok=False, status=exc.status, message=exc.message,
                     latencyMs=round((time.monotonic() - start) * 1000))
@@ -105,12 +107,12 @@ async def test_key(client, settings, key):
 
 
 async def deltas(client, settings, key, messages):
+    trace = getattr(key, "trace", {})
     base = validate_base_url(settings["baseUrl"])
     try:
-        async with client.stream("POST", base + "/chat/completions",
-            headers={"Authorization": "Bearer " + key}, json=payload(settings, messages, True)) as response:
+        async with rotating_response(client, base + "/chat/completions", payload(settings, messages, True), key, trace=trace) as response:
             if not 200 <= response.status_code < 300:
-                raise await response_error(response, key)
+                raise await response_error(response, trace.get("_key", ""))
             if "text/event-stream" not in response.headers.get("content-type", ""):
                 raise UpstreamError("upstream", response.status_code, "업스트림 서버가 SSE 응답을 반환하지 않았습니다.")
             parser = SSEParser()
@@ -120,15 +122,17 @@ async def deltas(client, settings, key, messages):
                     continue
                 if data.strip() == "[DONE]":
                     return
-                for delta in decode_delta(data, key):
+                for delta in decode_delta(data, trace.get("_key", "")):
                     yield delta
             data = parser.finish()
             if data is not None:
                 if data.strip() == "[DONE]":
                     return
-                for delta in decode_delta(data, key):
+                for delta in decode_delta(data, trace.get("_key", "")):
                     yield delta
             raise UpstreamError("upstream", response.status_code, "업스트림 응답이 완료되기 전에 연결이 종료되었습니다.")
+    except Exhausted as exc:
+        raise UpstreamError("rate_limit", 429, str(exc)) from None
     except httpx.HTTPError as exc:
         raise transport_error(exc) from None
 

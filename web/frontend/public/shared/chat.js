@@ -37,6 +37,7 @@
         if (Number.isFinite(timing?.totalMs)) parts.push('총 ' + seconds(timing.totalMs));
       }
       if (message.usage) parts.push(ExaRender.usageText(message.usage));
+      if (message.keyFailover?.length && message.keyIndex) parts.push(`키 ${message.keyIndex}번 사용 (${message.keyFailover.map(value => value.index + '번').join(', ')} 한도 초과)`);
       if (meta) { meta.textContent = parts.join(' · '); meta.hidden = !parts.length; }
       const summary = article.querySelector('.reasoning summary'), phase = run?.phases || {};
       if (summary) {

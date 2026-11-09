@@ -256,6 +256,38 @@ def feature_smoke():
                 browser.request("DELETE", "/api/session", expected=204)
 
 
+def keys_smoke():
+    a,b=Client(),Client()
+    try:
+        for c in (a,b):c.request('POST','/api/session',{})
+        a.request('PUT','/api/settings',{'baseUrl':MOCK})
+        first=a.request('POST','/api/keys',{'apiKey':'limited','label':'limited test'})
+        assert first['warning'] and first['keys'][0]['coolingSec']>0
+        keys=a.request('POST','/api/keys',{'apiKey':'good','label':'working test'})['keys']
+        path='/api/conversations/'+a.request('POST','/api/conversations',{})['id']
+        done=a.events(path+'/messages',{'content':'keys smoke','webSearch':True})[-1]
+        assert done[0]=='done' and done[1]['message']['keyIndex']==2
+        assert done[1]['message']['keyFailover'][0]['index']==1
+        assert a.request('POST','/api/key/test',{})['ok']
+        assert b.request('GET','/api/keys')==[]
+        b.request('DELETE','/api/keys/'+keys[0]['id'],expected=404)
+        changed=a.request('PATCH','/api/keys/'+keys[1]['id'],{'position':1,'label':'primary'})['keys']
+        assert changed[0]['id']==keys[1]['id']
+        a.request('DELETE','/api/keys/'+keys[0]['id'])
+        assert len(a.request('GET','/api/me')['keys'])==1
+        a.request('PUT','/api/key',{'apiKey':'limited'})
+        failed=a.events(path+'/messages',{'content':'all limited','webSearch':False})[-1]
+        assert failed[0]=='error' and failed[1]['status']==429 and '등록된 키 1개가 모두 한도 초과' in failed[1]['message']
+        a.request('PUT','/api/key',{'apiKey':'bad'})
+        a.request('POST','/api/keys',{'apiKey':'good'})
+        failed=a.events(path+'/messages',{'content':'bad primary'})[-1]
+        assert failed[0]=='error' and failed[1]['status']==401
+        check('multi-key verify/warning, 429 failover + planner + metadata, order/label/delete, isolation, all-limited and 401 no failover')
+    finally:
+        for c in (a,b):
+            if list(c.jar):c.request('DELETE','/api/session',expected=204)
+
+
 def main():
     a, b = Client(), Client()
     conv = None
@@ -429,6 +461,7 @@ def main():
                     pass
     search_smoke()
     feature_smoke()
+    keys_smoke()
     print("ALL SMOKE CHECKS PASSED", flush=True)
 
 

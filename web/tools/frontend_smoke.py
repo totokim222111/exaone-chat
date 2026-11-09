@@ -37,6 +37,13 @@ def settings(page, mobile):
 
 
 def save(page):
+    # This legacy regression suite deliberately replaces the primary fixture key.
+    key = page.locator('#apiKey').input_value()
+    if key:
+        api(page, '/api/key', 'DELETE')
+        if key == 'bad':
+            api(page, '/api/key', 'PUT', {'apiKey': key})
+            page.locator('#apiKey').fill('')
     page.locator("#saveSettings").click()
     expect(page.locator("#saveResult")).to_contain_text("저장됨")
     expect(page.locator("#saveSettings")).to_be_enabled()

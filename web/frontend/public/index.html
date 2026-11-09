@@ -24,6 +24,7 @@
   <script defer src="/shared/session.js"></script>
   <script defer src="/workspace.js"></script>
   <script defer src="/extras.js"></script>
+  <script defer src="/keys.js"></script>
   <script defer src="/app.js"></script>
 </head>
 <body class="web-app booting">
@@ -84,7 +85,8 @@
       <form id="settingsForm">
         <div class="settings-fields">
           <section class="settings-section"><h3>연결</h3>
-            <div class="field"><label for="apiKey">API 키</label><input id="apiKey" type="password" placeholder="API 키 입력" autocomplete="off" spellcheck="false" maxlength="8192"><p id="keyNote" class="field-note">이 서버에 암호화해 저장합니다.</p></div>
+            <div id="apiKeys" class="key-list" aria-label="API 키 목록"></div>
+            <div id="keyAdd" class="field key-add"><label for="apiKey">키 추가</label><input id="apiKey" type="password" placeholder="API 키 입력" autocomplete="off" spellcheck="false" maxlength="8192"><div class="key-add-bottom"><input id="newKeyLabel" aria-label="새 키 라벨" placeholder="라벨 (선택)" maxlength="30"><button id="addKey" class="outline" type="button">추가</button></div><p id="keyNote" class="field-note">추가 전에 연결을 확인합니다.</p></div><div id="keyResult" class="key-result" role="status"></div>
             <div id="baseUrlField" class="field"><label for="baseUrl">Base URL</label><input id="baseUrl" type="url" required spellcheck="false" maxlength="2048"></div>
             <div class="field"><label for="model">모델</label><input id="model" list="modelOptions" required spellcheck="false" maxlength="256"><datalist id="modelOptions"></datalist></div>
             <button id="checkConnection" class="outline" type="button">연결 확인</button>

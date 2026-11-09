@@ -13,6 +13,7 @@ internal sealed class Generation(Conversation conversation, AppSettings requestS
     public async Task Run(ApiClient api, ConversationStore store, Action<string, string?, ChatError?> emit, string? testKey = null)
     {
         var clock = System.Diagnostics.Stopwatch.StartNew();
+        var trace = new KeyTrace();
         double? first = null, reasonAt = null, answerAt = null, searchMs = null, searchAtMs = null;
         var c = Conversation;
         var history = c.Messages.ToList();
@@ -31,7 +32,7 @@ internal sealed class Generation(Conversation conversation, AppSettings requestS
                 var searchAt = clock.Elapsed.TotalMilliseconds;
                 searchAtMs = searchAt;
                 var question = history.LastOrDefault(m => m.Role == "user")?.Content ?? "";
-                answer.Search.Queries = await SearchService.Plan(api, RequestSettings, key, history, question, Cancellation.Token);
+                answer.Search.Queries = await SearchService.Plan(api, RequestSettings, key, history, question, Cancellation.Token, trace);
                 SearchEvent?.Invoke(new { stage = "queries", queries = answer.Search.Queries });
                 using var service = new SearchService();
                 answer.Search = await service.Search(RequestSettings, answer.Search.Queries, Cancellation.Token);
@@ -49,7 +50,7 @@ internal sealed class Generation(Conversation conversation, AppSettings requestS
                 if (kind == "reasoning") answer.Reasoning += text; else answer.Content += text;
                 emit(kind, text, null);
                 if (DateTime.UtcNow - lastSave > TimeSpan.FromSeconds(1)) { store.Save(c); lastSave = DateTime.UtcNow; }
-            }, Cancellation.Token, usage => answer.Usage = usage, context);
+            }, Cancellation.Token, usage => answer.Usage = usage, context, trace);
         }
         catch (OperationCanceledException) when (Cancellation.IsCancellationRequested) { Stopped = true; if (answer.Search is { Sources.Count: 0, Error: null }) answer.Search.Error = "검색이 완료되기 전에 중지되었습니다."; }
         catch (Exception ex)
@@ -59,7 +60,7 @@ internal sealed class Generation(Conversation conversation, AppSettings requestS
         }
         finally
         {
-            answer.Stopped = Stopped;
+            answer.Stopped = Stopped; answer.KeyIndex = trace.KeyIndex; answer.KeyFailover = trace.KeyFailover.Count > 0 ? trace.KeyFailover : null;
             var total = clock.Elapsed.TotalMilliseconds;
             if (searchAtMs is double searchStart) searchMs ??= total - searchStart;
             answer.Timing = new(first, reasonAt is double reason ? Math.Max(0, (answerAt ?? total) - reason) : null,

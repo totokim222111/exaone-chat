@@ -20,6 +20,22 @@ class KeyInput(Input):
         return v
 
 
+class KeysInput(KeyInput):
+    verify: StrictBool = True
+    label: str = Field(default='', max_length=30)
+
+
+class KeyPatch(Input):
+    label: str | None = Field(default=None, max_length=30)
+    position: int | None = Field(default=None, ge=1, le=5, strict=True)
+
+    @model_validator(mode='after')
+    def no_null(self):
+        if not self.model_fields_set or any(getattr(self, name) is None for name in self.model_fields_set):
+            raise ValueError('빈 변경 또는 null은 허용되지 않습니다.')
+        return self
+
+
 class SettingsInput(Input):
     baseUrl: str | None = Field(default=None, max_length=2048)
     model: str | None = Field(default=None, min_length=1, max_length=256)

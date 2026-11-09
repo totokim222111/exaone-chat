@@ -187,6 +187,14 @@
     serverAvailable: () => state.config?.search?.serverProvider === 'searxng',
     check: async () => { const payload = searchSettings.payload(); await api('/api/settings', 'PUT', { searchProvider: payload.searchProvider }); state.settings.searchProvider = payload.searchProvider; await saveSearchKeys(payload); return api('/api/search/test', 'POST', { provider: payload.searchProvider }); }, changed: updateSettingsSummary
   });
+  const keyUI = ExaKeys.create({
+    list: () => api('/api/keys'),
+    add: async value => { const saved = await api('/api/settings', 'PUT', { baseUrl: $('baseUrl').value.trim(), model: $('model').value.trim() }); Object.assign(state.settings, saved); const added = await api('/api/keys', 'POST', value); state.deletingKey = false; $('deleteKey').textContent = '키 삭제'; return added; },
+    patch: (key, value) => api('/api/keys/' + encodeURIComponent(key.id), 'PATCH', value),
+    remove: key => api('/api/keys/' + encodeURIComponent(key.id), 'DELETE'),
+    test: async key => { const saved = await api('/api/settings', 'PUT', { baseUrl: $('baseUrl').value.trim(), model: $('model').value.trim() }); Object.assign(state.settings, saved); return api('/api/keys/' + encodeURIComponent(key.id) + '/test', 'POST', {}); },
+    changed: keys => { state.settings.keys = keys; state.settings.hasKey = !!keys.length; state.settings.keySuffix = keys[0]?.last4 || ''; updateSettingsSummary(); }
+  });
   workspace = WebWorkspace.create({
     api, http, sessions, chat, current: () => state.current, conversations: () => state.conversations,
     setConversations: value => { state.conversations = value; }, changed: refreshGenerationUI,
@@ -200,7 +208,7 @@
   extras = WebExtras.create({ api, http, sessions, chat, current: () => state.current, conversations: () => state.conversations,
     ready: () => state.ready, access: () => state.access, official: () => isOfficial(state.settings.baseUrl), searchAvailable,
     openConversation, newConversation, openSettings, closeSettings, closeSidebar, showError,
-    lock: lockAccess, granted: async status => { state.access = status; await startSession(); }
+    lock: lockAccess, granted: async status => { state.access = status; state.config = await api('/api/config'); if (WebExtras.enforceHttps(state.config)) return; configureInputs(); await startSession(); }
   });
   function lockAccess(status) {
     state.access = status; state.ready = false; ++state.view;
@@ -394,8 +402,10 @@
     $('saveResult').textContent = ''; $('connectionResult').replaceChildren();
     $('settingsOverlay').hidden = false; closeSidebar(); updateModalState(); $('settingsPanel').focus();
     extras?.settingsOpened();
+    keyUI.refresh();
   }
   function closeSettings() {
+    keyUI.clear();
     searchSettings.clearSecrets();
     cancelHold(); $('apiKey').value = ''; $('settingsOverlay').hidden = true; updateModalState();
     state.lastFocus?.focus();
@@ -408,11 +418,13 @@
   async function saveSettings(event) {
     event.preventDefault(); if (state.settingsBusy) return; state.settingsBusy = true; updateSettingsSummary();
     try {
+      if (keyUI.pending() && !await keyUI.addInput()) throw new Error('키를 추가하지 못했습니다. 위 사유를 확인해 주세요.');
       state.settings = await request('settings.save', settingsPayload());
       $('apiKey').value = ''; $('apiKey').placeholder = state.settings.hasKey ? `저장됨 ••••${state.settings.keySuffix}` : 'API 키 입력';
       state.deletingKey = false; $('deleteKey').textContent = '키 삭제'; $('deleteKey').disabled = !state.settings.hasKey;
       $('keyNote').textContent = state.settings.hasKey ? '빈칸으로 저장하면 기존 키를 유지합니다.' : '이 서버에 암호화해 저장합니다.';
       searchSettings.refresh();
+      keyUI.refresh();
       $('saveResult').textContent = `저장됨 · ${time(new Date())}`; updateSettingsSummary();
     } catch (error) { $('saveResult').textContent = errorMessage(error); }
     finally { state.settingsBusy = false; updateSettingsSummary(); }
@@ -425,7 +437,7 @@
       await request('connection.check', settingsPayload());
       const status = make('span', 'status connected'); status.append(make('i'), '연결됨'); $('connectionResult').replaceChildren(status);
     } catch (error) { $('connectionResult').replaceChildren(make('span', 'tag', '실패'), make('span', '', errorMessage(error))); }
-    finally { state.settingsBusy = false; updateSettingsSummary(); }
+    finally { state.settingsBusy = false; updateSettingsSummary(); keyUI.refresh(); }
   }
   $('newChat').addEventListener('click', newConversation);
   $('toggleList').addEventListener('click', () => {
@@ -560,7 +572,7 @@
   }
   async function initialize() {
     try {
-      state.config = await api('/api/config'); configureInputs();
+      state.config = await api('/api/config'); if (WebExtras.enforceHttps(state.config)) return; configureInputs();
       state.access = await api('/api/access');
       if (state.access.required && !state.access.granted) { lockAccess(state.access); return; }
       await startSession();
