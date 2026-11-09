@@ -98,8 +98,9 @@ try {
     $files = @($baseCompose, (Join-Path $webRoot 'docker-compose.mock.yml'),
         (Join-Path $PSScriptRoot 'docker-compose.synology.yml'), (Join-Path $PSScriptRoot 'env.synology.example'),
         (Join-Path $PSScriptRoot 'nas-proxy.py'))
-    Invoke-Native 'scp' ($files + @("${nasTarget}:$stage/"))
-    Invoke-Native 'scp' @((Join-Path $webRoot 'searxng/settings.yml'), "${nasTarget}:$stage/searxng-settings.yml")
+    # Synology often disables the SFTP subsystem; -O forces the legacy SCP protocol.
+    Invoke-Native 'scp' (@('-O', '-o', 'BatchMode=yes') + $files + @("${nasTarget}:$stage/"))
+    Invoke-Native 'scp' @('-O', '-o', 'BatchMode=yes', (Join-Path $webRoot 'searxng/settings.yml'), "${nasTarget}:$stage/searxng-settings.yml")
 
     $install = @'
 set -eu

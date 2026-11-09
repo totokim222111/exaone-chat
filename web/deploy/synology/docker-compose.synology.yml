@@ -18,6 +18,12 @@ services:
   searxng:
     restart: unless-stopped
     logging: *nas-logging
+networks:
+  default:
+    # The NAS has used up Docker's default address pools; pin a free private subnet.
+    ipam:
+      config:
+        - subnet: 10.254.81.0/27
 volumes:
   pgdata:
     name: exaone_pgdata
