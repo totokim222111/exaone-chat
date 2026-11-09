@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse, Response
 
-from . import attachments, db, features
+from . import access, attachments, db, features
 from .chat_metrics import Timing
 from .config import (ALLOWED, COOKIE_SECURE, CUSTOM, DEFAULTS, DEFAULT_BASE_URL, DEFAULT_MODEL,
                      EXAONE_STYLE_HOSTS, MODELS, REASONING_EFFORTS, SEARXNG_URL, is_exaone_style)
@@ -43,6 +43,8 @@ async def lifespan(app):
     app.state.search_probe = (0, False)
     app.state.upload_rates = {}
     app.state.public_rates = {}
+    app.state.access_limiter = access.LoginLimiter()
+    app.state.access_hash_slots = asyncio.Semaphore(2)
     app.state.extract_slots = asyncio.Semaphore(2)
     await features.clean_unbound(app.state.pool)
     cleanup = asyncio.create_task(features.periodic_cleanup(app.state.pool))
@@ -58,6 +60,7 @@ async def lifespan(app):
 app = FastAPI(title="EXAONE Web API", lifespan=lifespan, docs_url=None, redoc_url=None,
               openapi_url="/api/openapi.json")
 app.add_middleware(RequestGuard)
+app.add_middleware(access.AccessGate)
 
 
 class ApiError(Exception):
@@ -196,6 +199,11 @@ async def health():
 
 @app.get("/api/config")
 async def config(request: Request):
+    if access.username() and await access.grant_for(request) is None:
+        return dict(defaultBaseUrl="", allowedBaseUrls=[], allowCustomBaseUrl=False,
+            defaultModel="", models=[], exaoneStyleHosts=[], reasoningEfforts=REASONING_EFFORTS,
+            defaultReasoningEffort="max", limits=dict(maxMessageChars=32000, maxSystemPromptChars=8000),
+            search=dict(available=False, serverProvider=None, providers=search_pipeline.PROVIDERS))
     checked, ready = app.state.search_probe
     if time.monotonic() - checked > 15:
         ready = await search_pipeline.search_status(app.state.http, SEARXNG_URL)
@@ -521,3 +529,4 @@ async def edit_message(cid: uuid.UUID, message_id: uuid.UUID, body: EditMessageI
 
 
 features.register(app, current_client, ApiError, conversation, message, owned, timestamp)
+access.register(app)

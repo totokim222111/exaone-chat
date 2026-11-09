@@ -152,11 +152,12 @@ def test_share_public_snapshot_delete_revoke_and_session_cleanup(api):
     assert api.get("/api/public/shares/" + second["token"]).status_code == 404
 
 
-def test_public_share_ip_rate_limit(api):
+def test_public_share_ip_rate_limit(api, monkeypatch):
+    monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
     for _ in range(60):
-        assert api.get("/api/public/shares/missing", headers={"X-Real-IP": "127.0.0.2"}).status_code == 404
-    assert api.get("/api/public/shares/missing", headers={"X-Real-IP": "127.0.0.2"}).status_code == 429
-    assert api.get("/api/public/shares/missing", headers={"X-Real-IP": "127.0.0.3"}).status_code == 404
+        assert api.get("/api/public/shares/missing", headers={"X-Forwarded-For": "127.0.0.2"}).status_code == 404
+    assert api.get("/api/public/shares/missing", headers={"X-Forwarded-For": "127.0.0.2"}).status_code == 429
+    assert api.get("/api/public/shares/missing", headers={"X-Forwarded-For": "127.0.0.3"}).status_code == 404
 
 
 def test_bulk_delete_skips_starred_generating_and_other_sessions(api):

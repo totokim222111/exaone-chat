@@ -12,7 +12,7 @@ import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-BASE = os.getenv("SMOKE_BASE_URL", "http://localhost:" + os.getenv("WEB_PORT", "8080"))
+BASE = os.getenv("SMOKE_BASE_URL", "http://127.0.0.1:" + os.getenv("WEB_PORT", "8080"))
 MOCK = "http://mock:9000/v1"
 
 
@@ -261,6 +261,9 @@ def main():
     conv = None
     try:
         assert a.request("GET", "/api/health") == {"ok": True, "db": True}
+        access = a.request("GET", "/api/access")
+        assert access == {"required": False, "granted": True, "username": None, "configured": False}
+        check("local mock access gate disabled")
         config = a.request("GET", "/api/config")
         assert MOCK in config["allowedBaseUrls"], "Mock override is required; refusing any external probe"
         assert {"api.exaone.ai", "mock"} <= set(config["exaoneStyleHosts"])

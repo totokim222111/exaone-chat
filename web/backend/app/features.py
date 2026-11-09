@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import ipaddress
 import secrets
 import time
 import uuid
@@ -13,6 +12,7 @@ from starlette.responses import JSONResponse, Response
 from . import attachments
 from .chat_metrics import share_snapshot, snippet
 from .models import BulkDeleteInput
+from .client_address import client_ip
 
 
 def limit(bucket, key, count, error):
@@ -162,11 +162,7 @@ def register(app, current_client, error, conv_json, msg_json, owned, timestamp):
 
     @app.get("/api/public/shares/{token}")
     async def public_share(token: str, request: Request):
-        host = request.client.host if request.client else "unknown"
-        try:
-            host = str(ipaddress.ip_address(request.headers.get("x-real-ip", host)))
-        except ValueError:
-            pass
+        host = client_ip(request)
         limit(app.state.public_rates, host, 60, error)
         row = await app.state.pool.fetchrow("SELECT snapshot FROM shares WHERE token=$1 AND revoked_at IS NULL", token)
         if row is None:

@@ -1,13 +1,16 @@
+name: exaone
 services:
   web:
+    image: exaone-chat-web:${EXAONE_TAG:-latest}
     build: ./frontend
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
   api:
+    image: exaone-chat-api:${EXAONE_TAG:-latest}
     build: ./backend
     environment:
       DB_HOST: db
@@ -16,6 +19,8 @@ services:
       DB_PASSWORD: ${POSTGRES_PASSWORD:-exaone-local-password}
       APP_SECRET: ${APP_SECRET:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      ACCESS_USERNAME: ${ACCESS_USERNAME:-}
+      TRUST_PROXY_HEADERS: ${TRUST_PROXY_HEADERS:-false}
       DEFAULT_BASE_URL: ${DEFAULT_BASE_URL:-https://api.exaone.ai/v1}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-k-exaone_v2.5}
       MODELS: ${MODELS:-k-exaone_v2.5,LGAI-EXAONE/K-EXAONE-2.0-750B-A37B,LGAI-EXAONE/K-EXAONE-236B-A23B}
@@ -38,7 +43,7 @@ services:
   searxng:
     image: searxng/searxng:2026.11.8-3a3dd15bf
     ports:
-      - "127.0.0.1:${SEARXNG_PORT:-8888}:8080"
+      - "${SEARXNG_BIND:-127.0.0.1}:${SEARXNG_PORT:-8888}:8080"
     environment:
       # Local-only default; set SEARXNG_SECRET for your own installation.
       SEARXNG_SECRET: ${SEARXNG_SECRET:-exaone-local-only-search-secret-change-me}
@@ -67,4 +72,6 @@ services:
     restart: unless-stopped
 volumes:
   pgdata:
+    name: ${PGDATA_VOLUME:-web_pgdata}
   apidata:
+    name: ${APIDATA_VOLUME:-web_apidata}

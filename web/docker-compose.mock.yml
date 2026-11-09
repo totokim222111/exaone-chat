@@ -4,10 +4,13 @@ services:
       ALLOWED_BASE_URLS: ${ALLOWED_BASE_URLS:-https://api.exaone.ai/v1,https://api.friendli.ai/serverless/v1},http://mock:9000/v1
       EXAONE_STYLE_HOSTS: api.exaone.ai,mock
       SEARXNG_URL: http://mock:9000
+      # Keep the local mock stack open; enabled-gate coverage runs in pytest.
+      ACCESS_USERNAME: ""
     depends_on:
       mock:
         condition: service_healthy
   mock:
+    image: exaone-chat-mock:${EXAONE_TAG:-latest}
     build: ./tools/mock_upstream
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
@@ -15,3 +18,9 @@ services:
       timeout: 3s
       retries: 10
     restart: unless-stopped
+volumes:
+  # These pre-existing local volumes are shared with the retired `web` project.
+  pgdata:
+    external: true
+  apidata:
+    external: true

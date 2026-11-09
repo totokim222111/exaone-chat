@@ -1,0 +1,25 @@
+x-nas-logging: &nas-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+services:
+  web:
+    image: exaone-chat-web:${EXAONE_TAG:-latest}
+    restart: unless-stopped
+    logging: *nas-logging
+  api:
+    image: exaone-chat-api:${EXAONE_TAG:-latest}
+    restart: unless-stopped
+    logging: *nas-logging
+  db:
+    restart: unless-stopped
+    logging: *nas-logging
+  searxng:
+    restart: unless-stopped
+    logging: *nas-logging
+volumes:
+  pgdata:
+    name: exaone_pgdata
+  apidata:
+    name: exaone_apidata

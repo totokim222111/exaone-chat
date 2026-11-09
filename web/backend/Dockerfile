@@ -8,4 +8,4 @@ RUN pip install --no-cache-dir -r requirements.txt -r requirements-dev.txt \
 COPY --chown=api:api app/ app/
 COPY --chown=api:api tests/ tests/
 USER api
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log", "--no-proxy-headers"]
