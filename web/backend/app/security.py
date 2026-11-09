@@ -2,6 +2,7 @@ import json
 from starlette.responses import JSONResponse
 
 MAX_BODY = 1024 * 1024
+MAX_UPLOAD_BODY = 10 * 1024 * 1024 + 65536
 
 
 def invalid_constant(value):
@@ -28,9 +29,12 @@ class RequestGuard:
         mutate = scope["method"] in ("POST", "PUT", "PATCH", "DELETE")
         if mutate and headers.get(b"x-exa") != b"1":
             return await reject(403, "csrf", "요청에 X-Exa: 1 헤더가 필요합니다.")
+        upload = scope["method"] == "POST" and scope["path"] == "/api/attachments"
+        maximum = MAX_UPLOAD_BODY if upload else MAX_BODY
+        size_message = "첨부 요청은 10MB 파일 한도를 초과할 수 없습니다." if upload else "요청 본문은 1MB 이하여야 합니다."
         try:
-            if int(headers.get(b"content-length", b"0")) > MAX_BODY:
-                return await reject(413, "body_too_large", "요청 본문은 1MB 이하여야 합니다.")
+            if int(headers.get(b"content-length", b"0")) > maximum:
+                return await reject(413, "body_too_large", size_message)
         except ValueError:
             return await reject(400, "validation", "요청 본문 길이가 올바르지 않습니다.")
         body = bytearray()
@@ -39,13 +43,16 @@ class RequestGuard:
             if message["type"] == "http.disconnect":
                 return
             body.extend(message.get("body", b""))
-            if len(body) > MAX_BODY:
-                return await reject(413, "body_too_large", "요청 본문은 1MB 이하여야 합니다.")
+            if len(body) > maximum:
+                return await reject(413, "body_too_large", size_message)
             if not message.get("more_body", False):
                 break
-        if body and headers.get(b"content-type", b"").split(b";")[0].strip().lower() != b"application/json":
+        content_type = headers.get(b"content-type", b"").split(b";")[0].strip().lower()
+        if upload and content_type != b"multipart/form-data":
+            return await reject(415, "multipart_required", "첨부 파일은 multipart/form-data 형식이어야 합니다.")
+        if not upload and body and content_type != b"application/json":
             return await reject(415, "json_required", "요청 본문은 JSON 형식이어야 합니다.")
-        if body:
+        if body and not upload:
             try:
                 json.loads(body, parse_constant=invalid_constant)
             except (ValueError, UnicodeDecodeError, RecursionError):

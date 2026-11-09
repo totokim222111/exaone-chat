@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 from .config import validate_base_url
 
@@ -71,18 +72,49 @@ class CreateConversation(GenerationOptions):
 
 
 class RenameConversation(Input):
-    title: str = Field(min_length=1, max_length=120)
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    starred: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def valid_patch(self):
+        if not self.model_fields_set or any(getattr(self, f) is None for f in self.model_fields_set):
+            raise ValueError("변경할 제목 또는 즐겨찾기를 입력해 주세요.")
+        return self
 
 
 class MessageInput(GenerationOptions):
-    content: str = Field(min_length=1, max_length=32000)
+    content: str = Field(default="", max_length=32000)
+    attachmentIds: list[UUID] | None = Field(default=None, max_length=5)
 
-    @field_validator("content")
-    @classmethod
-    def nonblank(cls, v):
-        if not v.strip():
+    @model_validator(mode="after")
+    def valid_message(self):
+        if "attachmentIds" in self.model_fields_set and self.attachmentIds is None:
+            raise ValueError("첨부 목록은 배열이어야 합니다.")
+        if self.attachmentIds and len(set(self.attachmentIds)) != len(self.attachmentIds):
+            raise ValueError("첨부를 중복 선택할 수 없습니다.")
+        if not self.content.strip() and not self.attachmentIds:
             raise ValueError("메시지를 입력해 주세요.")
-        return v
+        return self
+
+
+class EditMessageInput(MessageInput):
+    @model_validator(mode="after")
+    def valid_message(self):
+        if self.attachmentIds is None and "attachmentIds" not in self.model_fields_set:
+            return self  # Existing attachments are checked inside the transaction.
+        return super().valid_message()
+
+
+class BulkDeleteInput(Input):
+    ids: list[UUID] = Field(default_factory=list, max_length=1000)
+    all: StrictBool = False
+    keepStarred: StrictBool = False
+
+    @model_validator(mode="after")
+    def selection(self):
+        if not self.all and not self.ids:
+            raise ValueError("삭제할 대화를 선택해 주세요.")
+        return self
 
 
 class RetryInput(GenerationOptions):

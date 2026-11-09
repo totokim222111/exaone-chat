@@ -16,11 +16,12 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse, Response
 
-from . import db
+from . import attachments, db, features
+from .chat_metrics import Timing
 from .config import (ALLOWED, COOKIE_SECURE, CUSTOM, DEFAULTS, DEFAULT_BASE_URL, DEFAULT_MODEL,
                      EXAONE_STYLE_HOSTS, MODELS, REASONING_EFFORTS, SEARXNG_URL, is_exaone_style)
 from .crypto import KeyCipher, load_secret
-from .models import (CreateConversation, KeyInput, MessageInput, RenameConversation, RetryInput,
+from .models import (CreateConversation, EditMessageInput, KeyInput, MessageInput, RenameConversation, RetryInput,
                      SearchKeysInput, SearchTestInput, SettingsInput)
 from . import search_pipeline
 from .security import RequestGuard, validation_status
@@ -40,9 +41,18 @@ async def lifespan(app):
     app.state.rates = {}
     app.state.search_rates = {}
     app.state.search_probe = (0, False)
-    yield
-    await app.state.http.aclose()
-    await app.state.pool.close()
+    app.state.upload_rates = {}
+    app.state.public_rates = {}
+    app.state.extract_slots = asyncio.Semaphore(2)
+    await features.clean_unbound(app.state.pool)
+    cleanup = asyncio.create_task(features.periodic_cleanup(app.state.pool))
+    try:
+        yield
+    finally:
+        cleanup.cancel()
+        await asyncio.gather(cleanup, return_exceptions=True)
+        await app.state.http.aclose()
+        await app.state.pool.close()
 
 
 app = FastAPI(title="EXAONE Web API", lifespan=lifespan, docs_url=None, redoc_url=None,
@@ -57,7 +67,8 @@ class ApiError(Exception):
 
 @app.exception_handler(ApiError)
 async def api_error(request, exc):
-    return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status)
+    headers = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"} if request.url.path.startswith("/api/public/shares/") else None
+    return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status, headers=headers)
 
 
 @app.exception_handler(RequestValidationError)
@@ -117,6 +128,7 @@ def conversation(row):
     return {"id": str(row["id"]), "title": row["title"], "model": row["model"],
             "reasoningEffort": row["reasoning_effort"], "thinking": row["thinking"],
             "webSearch": row["web_search"],
+            "starred": row["starred"], "messageCount": row.get("message_count", 0),
             "createdAt": timestamp(row["created_at"]), "updatedAt": timestamp(row["updated_at"])}
 
 
@@ -125,6 +137,7 @@ def message(row):
             "reasoning": row["reasoning"], "error": row["error"], "stopped": row["stopped"],
             "usage": row["usage"], "reasoningEffort": row["reasoning_effort"],
             "search": row["search"],
+            "timing": row["timing"], "attachments": row.get("attachments", []),
             "createdAt": timestamp(row["created_at"])}
 
 
@@ -146,7 +159,7 @@ async def generation_settings(conn, client_id, conv, overrides):
 
 
 async def owned(pool, cid, client_id):
-    row = await pool.fetchrow("SELECT * FROM conversations WHERE id=$1 AND client_id=$2", cid, client_id)
+    row = await pool.fetchrow("SELECT c.*, (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id) message_count FROM conversations c WHERE c.id=$1 AND c.client_id=$2", cid, client_id)
     if row is None:
         raise ApiError(404, "not_found", "대화를 찾을 수 없습니다.")
     return row
@@ -282,7 +295,7 @@ async def test_search(body: SearchTestInput = Body(default_factory=SearchTestInp
 
 @app.get("/api/conversations")
 async def list_conversations(client=Depends(current_client)):
-    rows = await app.state.pool.fetch("SELECT * FROM conversations WHERE client_id=$1 ORDER BY updated_at DESC, id", client["id"])
+    rows = await app.state.pool.fetch("SELECT c.*, (SELECT count(*) FROM messages m WHERE m.conversation_id=c.id) message_count FROM conversations c WHERE client_id=$1 ORDER BY updated_at DESC, id", client["id"])
     return [conversation(r) for r in rows]
 
 
@@ -301,15 +314,17 @@ async def create_conversation(body: CreateConversation, client=Depends(current_c
 async def get_conversation(cid: uuid.UUID, client=Depends(current_client)):
     conv = await owned(app.state.pool, cid, client["id"])
     rows = await app.state.pool.fetch("SELECT m.* FROM messages m JOIN conversations c ON c.id=m.conversation_id WHERE c.id=$1 AND c.client_id=$2 ORDER BY m.seq", cid, client["id"])
+    rows, _ = await attachments.enrich(app.state.pool, rows, cid, client["id"])
     return conversation(conv) | {"messages": [message(r) for r in rows]}
 
 
 @app.patch("/api/conversations/{cid}")
 async def rename(cid: uuid.UUID, body: RenameConversation, client=Depends(current_client)):
-    row = await app.state.pool.fetchrow("UPDATE conversations SET title=$1,title_manual=true,updated_at=now() WHERE id=$2 AND client_id=$3 RETURNING *", body.title, cid, client["id"])
+    row = await app.state.pool.fetchrow("UPDATE conversations SET title=COALESCE($1,title),title_manual=title_manual OR $2,starred=COALESCE($3,starred),updated_at=now() WHERE id=$4 AND client_id=$5 RETURNING *",
+        body.title, "title" in body.model_fields_set, body.starred, cid, client["id"])
     if row is None:
         raise ApiError(404, "not_found", "대화를 찾을 수 없습니다.")
-    return conversation(row)
+    return conversation(await owned(app.state.pool, cid, client["id"]))
 
 
 @app.delete("/api/conversations/{cid}", status_code=204)
@@ -329,12 +344,14 @@ async def delete_session(client=Depends(current_client)):
     await app.state.pool.execute("DELETE FROM clients WHERE id=$1", client["id"])
     app.state.rates.pop(client["id"], None)
     app.state.search_rates.pop(client["id"], None)
+    app.state.upload_rates.pop(client["id"], None)
     response = Response(status_code=204)
     response.delete_cookie("exa_sid", path="/", secure=COOKIE_SECURE, httponly=True, samesite="lax")
     return response
 
 
-async def prepare(cid, client, content=None, retry=False, edit_id=None, overrides=None):
+async def prepare(cid, client, content=None, retry=False, edit_id=None, overrides=None, attachment_ids=None):
+    started = time.monotonic()
     pool = app.state.pool
     await owned(pool, cid, client["id"])
     check_busy(cid)
@@ -366,25 +383,31 @@ async def prepare(cid, client, content=None, retry=False, edit_id=None, override
                     seq = rows[-1]["seq"] + 1 if rows else 1
                     user = await conn.fetchrow("INSERT INTO messages(id,conversation_id,seq,role,content) SELECT $1,c.id,$2,'user',$3 FROM conversations c WHERE c.id=$4 AND c.client_id=$5 RETURNING *", uuid.uuid4(), seq, content, cid, client["id"])
                     rows.append(user)
+                await attachments.bind(conn, client["id"], user["id"], attachment_ids, ApiError)
+                rows, files = await attachments.enrich(conn, rows, cid, client["id"], include_text=True)
+                user = rows[-1]
+                if not user["content"].strip() and not user["attachments"]:
+                    raise ApiError(400, "validation", "메시지 또는 첨부 파일을 입력해 주세요.")
                 cfg = await generation_settings(conn, client["id"], conv, overrides or {})
                 if cfg["webSearch"]:
                     rate_limit(client["id"], search=True)
                 await conn.execute("UPDATE conversations SET title=CASE WHEN $1 AND NOT title_manual THEN $2 ELSE title END,model=$3,reasoning_effort=$4,thinking=$5,web_search=$6,updated_at=now() WHERE id=$7 AND client_id=$8",
-                    not retry and len(rows) == 1, user["content"][:30], cfg["model"],
+                    not retry and len(rows) == 1, (user["content"] or user["attachments"][0]["name"])[:30], cfg["model"],
                     cfg["reasoningEffort"], cfg["thinking"], cfg["webSearch"], cid, client["id"])
-        history = [{"role": r["role"], "content": r["content"]} for r in rows if r["error"] is None]
+        history = attachments.build_history(rows, files, user["id"])
         if cfg["systemPrompt"]:
             history.insert(0, {"role": "system", "content": cfg["systemPrompt"]})
         key = app.state.cipher.decrypt(client["api_key_enc"]) if client["api_key_enc"] else None
         credentials = search_credentials(client) if cfg["webSearch"] else {}
-        return EventResponse(lambda q: generate(q, cid, client["id"], user, cfg, key, history, retry, credentials),
+        return EventResponse(lambda q: generate(q, cid, client["id"], user, cfg, key, history, retry, credentials, started),
                              lambda: app.state.active.discard(cid))
     except BaseException:
         app.state.active.discard(cid)
         raise
 
 
-async def generate(queue, cid, client_id, user, cfg, key, history, retry, search_keys=None):
+async def generate(queue, cid, client_id, user, cfg, key, history, retry, search_keys=None, started=None):
+    metrics = Timing(started)
     parts = {"reasoning": [], "content": []}
     splitter = ThinkSplitter()
     trimmer = LeadingWhitespaceTrimmer()
@@ -405,6 +428,7 @@ async def generate(queue, cid, client_id, user, cfg, key, history, retry, search
     async def emit(kind, text):
         text = collect(kind, text)
         if text:
+            metrics.token(kind)
             await queue.put(event(kind, {"delta": text}))
 
     try:
@@ -413,15 +437,18 @@ async def generate(queue, cid, client_id, user, cfg, key, history, retry, search
         if not key:
             raise UpstreamError("no_key", None, "API 키를 먼저 저장해 주세요.")
         if cfg["webSearch"]:
+            metrics.search_started = time.monotonic()
             search = dict(queries=[], provider=None, sources=[], error=None)
             search_pending = True
-            body = search_pipeline.query_body(cfg["model"], history, user["content"],
+            question = history[-1]["content"]
+            body = search_pipeline.query_body(cfg["model"], history, question,
                 is_exaone_style(cfg["baseUrl"]), urlsplit(cfg["baseUrl"]).hostname == "api.friendli.ai")
-            search["queries"] = await search_pipeline.plan_queries(app.state.http, cfg["baseUrl"], key, body, user["content"])
+            search["queries"] = await search_pipeline.plan_queries(app.state.http, cfg["baseUrl"], key, body, question)
             await queue.put(event("search", {"stage": "queries", "queries": search["queries"]}))
             search = await search_pipeline.search_queries(app.state.http, search["queries"],
                 provider=cfg["searchProvider"], searxng_url=SEARXNG_URL, **(search_keys or {}))
             search_pending = False
+            metrics.search_ended = time.monotonic()
             if search["error"]:
                 await queue.put(event("search", {"stage": "error", "message": search["error"]}))
             else:
@@ -449,13 +476,15 @@ async def generate(queue, cid, client_id, user, cfg, key, history, retry, search
             collect(kind, text)
     except Exception:
         failure = dict(kind="upstream", status=None, message="응답을 생성하는 중 오류가 발생했습니다.")
+    timing = metrics.snapshot()
     async def persist():
         async with app.state.pool.acquire() as conn:
             async with conn.transaction():
-                saved = await conn.fetchrow("INSERT INTO messages(id,conversation_id,seq,role,content,reasoning,error,stopped,usage,reasoning_effort,search) SELECT $1,c.id,$2,'assistant',$3,$4,$5,$6,$7,$8,$9 FROM conversations c WHERE c.id=$10 AND c.client_id=$11 RETURNING *",
+                saved = await conn.fetchrow("INSERT INTO messages(id,conversation_id,seq,role,content,reasoning,error,stopped,usage,reasoning_effort,search,timing) SELECT $1,c.id,$2,'assistant',$3,$4,$5,$6,$7,$8,$9,$10 FROM conversations c WHERE c.id=$11 AND c.client_id=$12 RETURNING *",
                     uuid.uuid4(), user["seq"] + 1, "".join(parts["content"]), "".join(parts["reasoning"]), failure, stopped, usage,
-                    cfg["reasoningEffort"] if is_exaone_style(cfg["baseUrl"]) else None, search, cid, client_id)
-                conv = await conn.fetchrow("UPDATE conversations SET updated_at=now() WHERE id=$1 AND client_id=$2 RETURNING *", cid, client_id)
+                    cfg["reasoningEffort"] if is_exaone_style(cfg["baseUrl"]) else None, search, timing, cid, client_id)
+                await conn.execute("UPDATE conversations SET updated_at=now() WHERE id=$1 AND client_id=$2", cid, client_id)
+                conv = await owned(conn, cid, client_id) if saved is not None else None
         return saved, conv
 
     save_task = asyncio.create_task(persist())
@@ -478,7 +507,7 @@ async def generate(queue, cid, client_id, user, cfg, key, history, retry, search
 
 @app.post("/api/conversations/{cid}/messages")
 async def post_message(cid: uuid.UUID, body: MessageInput, client=Depends(current_client)):
-    return await prepare(cid, client, content=body.content, overrides=body.overrides())
+    return await prepare(cid, client, content=body.content, overrides=body.overrides(), attachment_ids=body.attachmentIds)
 
 
 @app.post("/api/conversations/{cid}/retry")
@@ -487,5 +516,8 @@ async def retry_message(cid: uuid.UUID, body: RetryInput = Body(default_factory=
 
 
 @app.post("/api/conversations/{cid}/messages/{message_id}/edit")
-async def edit_message(cid: uuid.UUID, message_id: uuid.UUID, body: MessageInput, client=Depends(current_client)):
-    return await prepare(cid, client, content=body.content, edit_id=message_id, overrides=body.overrides())
+async def edit_message(cid: uuid.UUID, message_id: uuid.UUID, body: EditMessageInput, client=Depends(current_client)):
+    return await prepare(cid, client, content=body.content, edit_id=message_id, overrides=body.overrides(), attachment_ids=body.attachmentIds)
+
+
+features.register(app, current_client, ApiError, conversation, message, owned, timestamp)

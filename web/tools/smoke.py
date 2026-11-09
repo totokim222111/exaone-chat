@@ -8,6 +8,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 BASE = os.getenv("SMOKE_BASE_URL", "http://localhost:" + os.getenv("WEB_PORT", "8080"))
@@ -45,6 +47,16 @@ class Client:
     def events(self, path, data=None):
         with self.request("POST", path, data) as stream:
             return list(read_events(stream))
+
+    def upload(self, name, raw):
+        boundary = "exa-smoke-" + uuid.uuid4().hex
+        body = (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{name}"\r\n'
+                'Content-Type: text/plain\r\n\r\n').encode() + raw + f"\r\n--{boundary}--\r\n".encode()
+        request = urllib.request.Request(BASE + "/api/attachments", data=body, method="POST",
+            headers={"X-Exa": "1", "Content-Type": "multipart/form-data; boundary=" + boundary})
+        with self.opener.open(request, timeout=40) as response:
+            assert response.status == 200
+            return json.load(response)
 
 
 def read_events(stream):
@@ -94,6 +106,9 @@ def concurrent_streams(client):
         assert all(not future.done() for future in pending), "All four streams must overlap"
         conflict = client.request("POST", paths[0] + "/messages", {"content": "duplicate"}, expected=409)
         assert conflict["error"]["code"] == "busy"
+        skipped = client.request("POST", "/api/conversations/bulk-delete", {"ids": [path.rsplit("/", 1)[1] for path in paths]})
+        assert skipped["deleted"] == 0 and len(skipped["skipped"]) == 4
+        assert all(s["reason"] == "generating" for s in skipped["skipped"])
         outputs = [future.result(timeout=30) for future in pending]
     assert time.monotonic() - started < 30, "Slow streams ran serially instead of concurrently"
     for i, output in enumerate(outputs):
@@ -112,6 +127,7 @@ def concurrent_streams(client):
         assert saved["reasoningEffort"] == efforts[i] and saved["thinking"] == (i % 2 == 0)
         client.request("DELETE", paths[i], expected=204)
     check("same session: four slow streams finish concurrently without mixed content; same conversation 409")
+    check("bulk-delete consistently skips active generations")
 
 
 def search_smoke():
@@ -146,6 +162,7 @@ def search_smoke():
         assert "[1]" in done["content"] and "[2]" in done["content"]
         assert done["search"]["provider"] == "searxng" and len(done["search"]["sources"]) == 2
         assert done["search"]["error"] is None
+        assert type(done["timing"]["searchMs"]) is int
         assert all(len(s["snippet"]) <= 700 for s in done["search"]["sources"])
         assert a.request("GET", path)["messages"][-1] == done
         assert a.request("GET", "/api/me")["settings"]["webSearch"] is True
@@ -161,6 +178,78 @@ def search_smoke():
         assert plain[-1][1]["message"]["search"] is None
         assert a.request("GET", path)["webSearch"] is False
         check("search failure still completes answer; disabling search is remembered")
+    finally:
+        for browser in (a, b):
+            if list(browser.jar):
+                browser.request("DELETE", "/api/session", expected=204)
+
+
+def feature_smoke():
+    a, b, public = Client(), Client(), Client()
+    try:
+        a.request("POST", "/api/session", {})
+        b.request("POST", "/api/session", {})
+        a.request("PUT", "/api/settings", {"baseUrl": MOCK})
+        a.request("PUT", "/api/key", {"apiKey": "good"})
+        raw = b"ATTACHMENT_PRIVATE_BODY: file evidence"
+        item = a.upload("smoke-evidence.txt", raw)
+        assert item["kind"] == "text" and item["size"] == len(raw) and item["textChars"] == len(raw)
+        conv = a.request("POST", "/api/conversations", {})
+        path = "/api/conversations/" + conv["id"]
+        events = a.events(path + "/messages", {"content": "uniqueBodyNeedle attachment question", "attachmentIds": [item["id"]]})
+        assert events[0][1]["message"]["attachments"][0]["id"] == item["id"]
+        done = events[-1][1]["message"]
+        saved = a.request("GET", path)
+        assert saved["messages"][0]["attachments"][0]["name"] == "smoke-evidence.txt"
+        assert saved["messages"][-1] == done
+        timing = done["timing"]
+        assert set(timing) == {"firstTokenMs", "reasoningMs", "answerMs", "totalMs", "searchMs"}
+        assert all(type(timing[k]) is int and timing[k] >= 0 for k in timing if k != "searchMs")
+        assert timing["totalMs"] >= timing["firstTokenMs"] and timing["searchMs"] is None
+        with a.opener.open(BASE + "/api/attachments/" + item["id"] + "/download", timeout=10) as response:
+            assert response.read() == raw
+            assert response.headers["Content-Type"] == "application/octet-stream"
+            assert response.headers["X-Content-Type-Options"] == "nosniff"
+            assert "filename*=UTF-8''" in response.headers["Content-Disposition"]
+        b.request("GET", "/api/attachments/" + item["id"] + "/download", expected=404)
+        a.request("DELETE", "/api/attachments/" + item["id"], expected=409)
+        check("attachment upload/send/persist/download, ownership and timing fields")
+        assert a.request("PATCH", path, {"starred": True})["starred"]
+        listing = a.request("GET", "/api/conversations")
+        assert listing[0]["messageCount"] == 2 and listing[0]["starred"]
+        for query in ("uniquebodyneedle", "smoke-evidence"):
+            result = a.request("GET", "/api/search/conversations?" + urllib.parse.urlencode({"q": query}))
+            assert result and result[0]["starred"]
+            hit = result[0]
+            assert hit["snippet"][hit["matchStart"]:hit["matchStart"] + hit["matchLength"]].lower() == query
+        assert b.request("GET", "/api/search/conversations?q=uniquebodyneedle") == []
+        totals = a.request("GET", "/api/usage")
+        assert all(x == {"promptTokens": 123, "completionTokens": 456, "reasoningTokens": 48, "messages": 1} for x in totals.values())
+        check("starred/messageCount, body/attachment-name search, isolated usage totals")
+        share = a.request("POST", path + "/share", {})
+        second_share = a.request("POST", path + "/share", {})
+        shared_path = "/api/public/shares/" + share["token"]
+        snapshot = public.request("GET", shared_path, csrf=False)
+        assert len(share["token"]) == 22 and share["path"] == "/s/" + share["token"]
+        encoded = json.dumps(snapshot)
+        assert '"reasoning"' not in encoded and "ATTACHMENT_PRIVATE_BODY" not in encoded
+        assert snapshot["messages"][0]["attachments"] == [{"name": "smoke-evidence.txt", "kind": "text", "size": len(raw)}]
+        assert len(a.request("GET", "/api/shares")) == 2
+        b.request("DELETE", "/api/shares/" + share["token"], expected=404)
+        foreign = b.request("POST", "/api/conversations", {})["id"]
+        spare = a.request("POST", "/api/conversations", {})["id"]
+        assert a.request("POST", "/api/conversations/bulk-delete", {"ids": [spare, foreign]}) == {"deleted": 1, "skipped": []}
+        kept = a.request("POST", "/api/conversations/bulk-delete", {"all": True, "keepStarred": True})
+        assert kept == {"deleted": 0, "skipped": [{"id": conv["id"], "reason": "starred"}]}
+        assert b.request("GET", "/api/conversations/" + foreign)["id"] == foreign
+        a.request("PATCH", path, {"starred": False})
+        assert a.request("POST", "/api/conversations/bulk-delete", {"all": True})["deleted"] == 1
+        assert public.request("GET", shared_path, csrf=False) == snapshot
+        a.request("DELETE", "/api/shares/" + share["token"], expected=204)
+        public.request("GET", shared_path, csrf=False, expected=404)
+        a.request("DELETE", "/api/session", expected=204)
+        public.request("GET", "/api/public/shares/" + second_share["token"], csrf=False, expected=404)
+        check("public snapshot privacy/revocation, bulk-delete preservation/isolation and session cascade")
     finally:
         for browser in (a, b):
             if list(browser.jar):
@@ -252,6 +341,7 @@ def main():
             raise AssertionError("Disconnected stream was not saved as stopped")
         partial = saved["messages"][-1]
         assert partial["content"] and not partial["error"]
+        assert partial["timing"]["totalMs"] >= 0 and partial["timing"]["answerMs"] is not None
         check("disconnect cancels upstream and saves stopped partial")
         a.request("PUT", "/api/key", {"apiKey": "good"})
         events = a.events(path + "/retry", {})
@@ -265,6 +355,7 @@ def main():
         errors = a.events(path + "/messages", {"content": "키 없음"})
         assert errors[-1][0] == "error" and errors[-1][1]["kind"] == "no_key"
         assert errors[-1][1]["assistantMessage"]["error"]["kind"] == "no_key"
+        assert errors[-1][1]["assistantMessage"]["timing"]["firstTokenMs"] is None
         a.request("PUT", "/api/key", {"apiKey": "bad"})
         errors = a.events(path + "/retry", {})
         assert errors[-1][1]["kind"] == "auth" and errors[-1][1]["status"] == 401
@@ -334,6 +425,7 @@ def main():
                 except Exception:
                     pass
     search_smoke()
+    feature_smoke()
     print("ALL SMOKE CHECKS PASSED", flush=True)
 
 
