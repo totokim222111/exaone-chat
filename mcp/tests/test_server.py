@@ -256,7 +256,10 @@ def test_tool_schema_and_validation():
     props = tools["ask_exaone"].inputSchema["properties"]
     assert props["max_tokens"]["minimum"] == 1
     assert props["max_tokens"]["maximum"] == 65536
-    assert props["reasoning_effort"]["enum"] == ["low", "high", "max"]
+    # Optional: omitted means EXAONE_DEFAULT_EFFORT (default high).
+    effort = props["reasoning_effort"]
+    enums = [branch.get("enum") for branch in effort.get("anyOf", [effort]) if "enum" in branch]
+    assert enums == [["low", "high", "max"]]
     for arguments in [{"prompt": "hi", "max_tokens": 0}, {"prompt": "hi", "max_tokens": 65537},
                       {"prompt": "hi", "reasoning_effort": "invalid"},
                       {"prompt": "hi", "history": [{"role": "system", "content": "x"}]}]:

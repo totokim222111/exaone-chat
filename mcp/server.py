@@ -275,17 +275,23 @@ mcp = FastMCP("EXAONE", instructions="LG EXAONE에 질문하거나 연결 상태
 @mcp.tool(description="LG EXAONE에 독립적인 질문·분석·코딩 검토·한국어 작업을 요청하거나 다른 모델의 의견을 얻습니다. "
           "Ask LG EXAONE for an independent answer, analysis, code review, Korean writing, or a second opinion. "
           "history는 이전 user/assistant 대화이며 system은 지침입니다. 추론은 항상 켜지고 max_tokens에 포함됩니다. "
-          "Reasoning is always enabled and counts toward max_tokens; include_reasoning exposes the model's reasoning output.")
+          "Reasoning is always enabled and counts toward max_tokens; include_reasoning exposes the model's reasoning output. "
+          "EXAONE은 웹 검색을 못 하므로 최신 정보가 필요하면 먼저 검색한 결과를 prompt에 넣어 전달하세요. "
+          "EXAONE cannot browse the web: when current facts matter, search first and include the findings in the prompt. "
+          "reasoning_effort를 생략하면 EXAONE_DEFAULT_EFFORT 환경변수(기본 high)를 씁니다.")
 async def ask_exaone(
     prompt: Annotated[str, Field(min_length=1, description="질문 또는 작업 / Question or task")],
     system: str | None = None,
-    reasoning_effort: Literal["low", "high", "max"] = "high",
+    reasoning_effort: Literal["low", "high", "max"] | None = None,
     max_tokens: Annotated[int, Field(ge=1, le=65536)] = 8192,
     include_reasoning: bool = False,
     temperature: Annotated[float, Field(allow_inf_nan=False)] | None = None,
     history: list[HistoryMessage] | None = None,
 ) -> str:
     config = load_config()
+    if reasoning_effort is None:
+        env_effort = os.environ.get("EXAONE_DEFAULT_EFFORT", "").strip().lower()
+        reasoning_effort = env_effort if env_effort in ("low", "high", "max") else "high"
     try:
         body = build_body(config, prompt, system, reasoning_effort, max_tokens, temperature, history)
         result = await request_completion(config, body)
