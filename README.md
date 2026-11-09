@@ -6,6 +6,7 @@ LG AI연구원의 EXAONE 모델과 대화하는 챗봇입니다. API 키만 넣�
 |---|---|---|
 | 윈도우 앱 | [`windows/`](windows/) | .NET 8 WinForms + WebView2, exe 하나 |
 | 웹 | [`web/`](web/) | docker-compose: nginx · FastAPI · PostgreSQL |
+| Claude Code 도구 | [`mcp/`](mcp/) | stdio MCP 서버 (`ask_exaone`, `exaone_status`) |
 
 ## API 키
 
@@ -71,3 +72,30 @@ windows\dist\ExaoneChat.exe --selftest http://127.0.0.1:18765
 ## 웹
 
 준비 중입니다.
+
+## Claude Code에서 EXAONE 부르기 (MCP)
+
+Claude Code가 대화 중에 EXAONE에게 질문을 보내고 답을 받아 오는 MCP 서버입니다. "엑사원한테 물어봐", "엑사원 답이랑 비교해 줘"처럼 쓰면 됩니다.
+
+| 도구 | 하는 일 |
+|---|---|
+| `ask_exaone` | 질문을 보내고 답변을 돌려줍니다. 시스템 프롬프트, 추론 강도, 이전 대화, 생각 과정 포함 여부를 고를 수 있습니다. 끝에 토큰과 걸린 시간이 붙습니다. |
+| `exaone_status` | 키 출처, 주소, 모델을 보여주고 짧은 요청으로 연결을 확인합니다. |
+
+### 설치
+
+Python 3.11 이상이 필요합니다.
+
+```powershell
+pwsh -File mcp\setup.ps1
+claude mcp add --scope user exaone -- E:\exaone\mcp\.venv\Scripts\python.exe -u E:\exaone\mcp\server.py
+```
+
+경로는 저장소를 받은 위치에 맞게 바꿉니다. 등록한 뒤 새로 연 Claude Code 세션부터 도구가 보입니다.
+
+### 키를 찾는 순서
+
+1. 환경변수 `EXAONE_API_KEY`
+2. 윈도우 앱 설정 파일 `windows\dist\data\settings.json` (같은 Windows 계정이면 앱에 저장한 키를 그대로 씁니다. 위치는 `EXAONE_SETTINGS`로 바꿀 수 있습니다.)
+
+주소와 모델은 `EXAONE_BASE_URL`, `EXAONE_MODEL` 환경변수로 바꿀 수 있고, 없으면 윈도우 앱 설정, 그다음 기본값을 씁니다. 키 원문은 로그나 도구 결과에 나오지 않습니다.

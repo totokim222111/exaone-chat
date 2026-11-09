@@ -9,6 +9,10 @@ windows/tools/.selftest-*/
 # Web
 web/.env
 
+# MCP server
+mcp/.venv/
+mcp/.pytest_tmp/
+
 # Python
 __pycache__/
 *.pyc
