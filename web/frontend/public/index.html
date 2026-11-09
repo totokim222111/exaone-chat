@@ -3,26 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <script src="/shared/theme-init.js"></script>
   <title>EXAONE</title>
-  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
-  <link rel="stylesheet" href="app.css">
-  <link rel="stylesheet" href="shared/vendor/katex.min.css">
-  <link rel="stylesheet" href="shared/render.css">
-  <link rel="stylesheet" href="workspace.css">
-  <script defer src="shared/vendor/marked.min.js"></script>
-  <script defer src="shared/vendor/purify.min.js"></script>
-  <script defer src="shared/vendor/highlight.min.js"></script>
-  <script defer src="shared/vendor/katex.min.js"></script>
-  <script defer src="shared/search.js"></script>
-  <script defer src="shared/search-settings.js"></script>
-  <script defer src="shared/render.js"></script>
-  <script defer src="shared/chat.js"></script>
-  <script defer src="shared/session.js"></script>
-  <script defer src="workspace.js"></script>
-  <script defer src="app.js"></script>
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/shared/vendor/katex.min.css">
+  <link rel="stylesheet" href="/shared/render.css">
+  <link rel="stylesheet" href="/shared/theme.css">
+  <link rel="stylesheet" href="/workspace.css">
+  <link rel="stylesheet" href="/extras.css">
+  <script defer src="/shared/vendor/marked.min.js"></script>
+  <script defer src="/shared/vendor/purify.min.js"></script>
+  <script defer src="/shared/vendor/highlight.min.js"></script>
+  <script defer src="/shared/vendor/katex.min.js"></script>
+  <script defer src="/shared/search.js"></script>
+  <script defer src="/shared/search-settings.js"></script>
+  <script defer src="/shared/render.js"></script>
+  <script defer src="/shared/chat.js"></script>
+  <script defer src="/shared/session.js"></script>
+  <script defer src="/workspace.js"></script>
+  <script defer src="/extras.js"></script>
+  <script defer src="/app.js"></script>
 </head>
-<body class="web-app">
+<body class="web-app booting">
   <button id="sidebarShade" class="sidebar-shade" aria-label="목록 닫기" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="대화 목록">
     <div class="brand">EXAONE</div>
@@ -37,6 +41,7 @@
       <button id="toggleList" aria-expanded="false" aria-controls="sidebar">목록</button>
       <h1 id="chatTitle">새 대화</h1><button id="starChat" class="star-toggle" type="button" aria-pressed="false" hidden><i hidden></i><span>즐겨찾기</span></button>
       <div class="model-status"><span id="modelLabel"></span></div>
+      <button id="shareChat" type="button" disabled>공유</button>
       <button id="exportChat" type="button" disabled>내보내기</button>
     </header>
     <div id="appError" class="app-error" role="alert" hidden></div>
@@ -93,13 +98,17 @@
             <div class="field"><div class="field-label"><label for="braveKey">Brave 키</label><button id="deletebraveKey" type="button">키 삭제</button></div><input id="braveKey" type="password" autocomplete="off" spellcheck="false" maxlength="8192"><p class="field-note"><a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">Brave에서 키 발급</a></p></div>
             <button id="checkSearch" class="outline" type="button">검색 확인</button><div id="searchResult" class="connection-result" role="status"></div>
           </section>
+          <section class="settings-section"><h3>화면</h3><div class="theme-options generation-options" role="group" aria-label="화면 모드"><button type="button" data-theme-choice="light">라이트</button><button type="button" data-theme-choice="dark">다크</button><button type="button" data-theme-choice="system">시스템</button></div></section>
           <section class="settings-section"><h3>응답</h3>
             <div class="field"><label for="temperature">Temperature</label><div class="range-row"><input id="temperatureRange" aria-label="Temperature 슬라이더" type="range" min="0" max="2" step="0.05"><input id="temperature" type="number" min="0" max="2" step="0.05" required></div></div>
             <div class="field"><label for="topP">Top P</label><div class="range-row"><input id="topPRange" aria-label="Top P 슬라이더" type="range" min="0" max="1" step="0.01"><input id="topP" type="number" min="0" max="1" step="0.01" required></div></div>
             <div class="field"><label for="maxTokens">최대 토큰</label><input id="maxTokens" type="number" min="1" max="65536" step="1" required></div>
             <div class="field"><label for="systemPrompt">시스템 프롬프트</label><textarea id="systemPrompt" rows="4" placeholder="응답 방식이나 역할을 지정하세요"></textarea></div>
           </section>
+          <section class="settings-section"><h3>사용량</h3><div id="usageRamp" class="usage-ramp" role="status"></div></section>
+          <section class="settings-section"><h3>공유한 링크</h3><div id="sharedLinks" class="shared-links"></div></section>
           <section class="settings-section"><h3>이 브라우저</h3>
+            <button id="logout" type="button" hidden>로그아웃</button>
             <div class="browser-actions"><button id="deleteKey" type="button">키 삭제</button><button id="deleteSession" class="danger" type="button" aria-describedby="deleteHint"><span>모든 기록 삭제</span></button></div>
             <p id="deleteHint" class="field-note">모든 기록 삭제는 1.2초 동안 길게 누르면 확정됩니다. 키와 설정도 함께 삭제됩니다.</p>
           </section>

@@ -1,0 +1,11 @@
+:root{color-scheme:light;--code-bg:var(--deep);--code-fg:var(--on-deep);--code-keyword:#ECF0ED;--code-string:#9FB9A7;--code-number:#C3D4C8;--svg-bg:#ECF0ED;--link:color-mix(in srgb,var(--t4) 80%,var(--ink))}
+:root[data-theme=dark]{color-scheme:dark;--t0:#0E1712;--t1:#14211A;--t2:#1D2E24;--t3:#2C4436;--t4:#7FA88F;--deep:#D2E2D7;--ink:#E3ECE5;--muted:#8FA597;--on-deep:#0E1712;--code-bg:#09110D;--code-fg:#C8DACD;--link:var(--t4)}
+::selection{background:var(--t3);color:var(--ink)}
+html{scrollbar-color:var(--t3) var(--t0)}
+.primary,.conversation-row.current,.tag,.generation-options button[aria-pressed=true],.tool-tabs button[aria-pressed=true]{color:var(--on-deep)}
+.primary:disabled{color:var(--on-deep)}
+.danger::after,.hold-action::after{color:var(--on-deep)}
+.theme-options{display:flex}
+.theme-options button{flex:1}
+.markdown .citation a,.source-row:hover .source-title{color:var(--link)}
+.markdown .citation a:hover{color:var(--ink)}

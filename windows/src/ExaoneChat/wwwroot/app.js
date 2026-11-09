@@ -25,6 +25,7 @@
     else p.resolve(message.result);
   }
   if (native) native.addEventListener('message', event => receive(event.data));
+  window.addEventListener('exa-theme', event => { state.settings.theme = event.detail; request('theme.set', { theme: event.detail }).catch(showError); });
   function request(type, payload = {}, onEvent) {
     return new Promise((resolve, reject) => {
       const reqId = `r${++requestNumber}`;
@@ -289,7 +290,7 @@
   function settingsPayload() {
     return { baseUrl: $('baseUrl').value.trim(), model: $('model').value.trim(), systemPrompt: $('systemPrompt').value,
       temperature: Number($('temperature').value), topP: Number($('topP').value), maxTokens: Number($('maxTokens').value),
-      ...searchSettings.payload(), newApiKey: $('apiKey').value.trim(), deleteKey: state.deletingKey };
+      ...searchSettings.payload(), theme: ExaTheme.get(), newApiKey: $('apiKey').value.trim(), deleteKey: state.deletingKey };
   }
   async function saveSettings(event) {
     event.preventDefault(); $('saveSettings').disabled = true;
@@ -357,6 +358,7 @@
     try {
       const [settings, conversations] = await Promise.all([request('settings.get'), request('conversations.list')]);
       state.settings = settings; state.conversations = conversations;
+      if (native && ExaTheme.get() !== (settings.theme || 'system')) ExaTheme.set(settings.theme || 'system');
       renderList(); renderConversation(); $('messageInput').focus();
     } catch (error) { showError(error); }
   }
@@ -385,6 +387,7 @@
         switch (type) {
           case 'saveFile': reply(ExaRender.download(p.name, p.mime, p.text)); break;
           case 'settings.get': reply(settings); break;
+          case 'theme.set': settings.theme = p.theme; reply({ theme: p.theme }); break;
           case 'settings.save': {
             validate(p);
             const { newApiKey, deleteKey, tavilyKey, braveKey, ...safe } = p;

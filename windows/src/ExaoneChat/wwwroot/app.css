@@ -12,7 +12,7 @@ textarea{resize:vertical}
 [hidden]{display:none!important}
 a{color:inherit;text-decoration:none}
 .outline{border:1px solid var(--t3);padding:9px 15px;font-weight:600}
-.primary{background:var(--deep);color:var(--t0);padding:10px 24px;font-weight:600;font-size:14px}
+.primary{background:var(--deep);color:var(--on-deep);padding:10px 24px;font-weight:600;font-size:14px}
 .primary:hover{background:color-mix(in oklab,var(--deep) 82%,var(--t4))}
 .primary:disabled{color:var(--on-deep)}
 .sidebar{width:260px;flex-shrink:0;background:var(--t1);display:flex;flex-direction:column}
@@ -23,7 +23,7 @@ a{color:inherit;text-decoration:none}
 .conversation-list{flex:1;min-height:0;overflow:auto;padding:0 12px 24px}
 .conversation-row{position:relative;display:flex;align-items:center;height:42px;margin-bottom:2px}
 .conversation-row:hover{background:var(--t2)}
-.conversation-row.current{background:var(--deep);color:var(--t0)}
+.conversation-row.current{background:var(--deep);color:var(--on-deep)}
 .conversation-open{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;flex:1;min-width:0;height:42px;padding:10px 12px;font-size:13px;background:transparent!important}
 .conversation-delete{display:none;font-size:11px;margin-right:4px;padding:4px 7px}
 .conversation-row:hover .conversation-delete,.conversation-row:focus-within .conversation-delete,.conversation-delete.confirming{display:block}
@@ -63,7 +63,7 @@ main{display:flex;flex:1;min-width:0;flex-direction:column;height:100%}
 .streaming .answer-content::after{content:"";display:block;width:8px;height:16px;margin-top:8px;background:var(--t4);animation:blink 1.1s steps(2,start) infinite}
 .error-block{margin-top:18px;padding:14px 0;border-top:1px solid var(--t3);font-size:13px;line-height:1.7}
 .error-line{display:flex;align-items:flex-start;gap:10px}.error-line p{flex:1}
-.tag{display:inline-block;background:var(--deep);color:var(--t0);padding:2px 7px;font-size:11px;line-height:1.6;flex-shrink:0}
+.tag{display:inline-block;background:var(--deep);color:var(--on-deep);padding:2px 7px;font-size:11px;line-height:1.6;flex-shrink:0}
 .error-actions{display:flex;align-items:center;gap:18px;margin:8px 0 0 43px}
 .error-actions button{font-size:12px;padding:0}.error-actions .settings-link{border-bottom:2px solid var(--t4)}
 .app-error{margin:12px 32px 0;padding:10px 0;border-top:1px solid var(--t4);font-size:13px;color:var(--deep)}

@@ -27,7 +27,14 @@ internal sealed class MainForm : Form
         Text = "EXAONE";
         Size = new(1200, 800); MinimumSize = new(760, 560);
         StartPosition = FormStartPosition.CenterScreen;
-        BackColor = Color.FromArgb(236, 240, 237);
+        var dark = settings.Value.Theme == "dark";
+        if (settings.Value.Theme == "system")
+        {
+            try { dark = Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 1) is int useLight && useLight == 0; }
+            catch { dark = false; }
+        }
+        BackColor = dark ? Color.FromArgb(14, 23, 18) : Color.FromArgb(236, 240, 237);
+        web.DefaultBackgroundColor = BackColor;
         using var icon = Assembly.GetExecutingAssembly().GetManifestResourceStream("app.ico");
         if (icon is not null) Icon = new Icon(icon);
         if (settings.Value.Window is { } p)
@@ -87,6 +94,7 @@ internal sealed class MainForm : Form
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.WebMessageReceived += Receive;
+            await core.AddScriptToExecuteOnDocumentCreatedAsync("window.__exaInitialTheme = " + Json.Serialize(settings.Value.Theme) + ";");
             core.Navigate("https://app.exaone/");
         }
         catch (Exception ex)
@@ -136,6 +144,10 @@ internal sealed class MainForm : Form
                     }
                     break;
                 case "settings.get": Reply(reqId, await PublicSettings()); break;
+                case "theme.set":
+                    var theme = p.GetProperty("theme").GetString();
+                    if (theme is not ("light" or "dark" or "system")) throw new InvalidOperationException("화면 모드를 확인하세요.");
+                    settings.Value.Theme = theme; settings.Save(); Reply(reqId, new { theme }); break;
                 case "search.test":
                     var searchSettings = settings.Draft(p);
                     var startedSearch = System.Diagnostics.Stopwatch.StartNew();

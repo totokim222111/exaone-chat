@@ -350,6 +350,19 @@ internal static class SelfTest
             await Task.WhenAll(ga.Run(api, store, (_, _, _) => { }, "mock-key"), gb.Run(api, store, (_, _, _) => { }, "mock-key"));
             Assert(ga.Error is null && gb.Error is null && store.Get(a.Id).Messages[^1].Search?.Queries[0] == "검색 A" && store.Get(b.Id).Messages[^1].Search?.Queries[0] == "검색 B", "Parallel search metadata crossed");
         });
+        await Test("theme defaults, settings persistence and invalid value rejection", () =>
+        {
+            var themeRoot = Path.Combine(root, "theme"); var store = new SettingsStore(themeRoot);
+            Assert(store.Value.Theme == "system", "Initial theme must follow the system");
+            foreach (var theme in new[] { "light", "dark", "system" })
+            {
+                store.Value.Theme = theme; SettingsStore.Validate(store.Value); store.Save();
+                Assert(new SettingsStore(themeRoot).Value.Theme == theme && Json.Serialize(store.Public()).Contains("\"theme\": \"" + theme + "\""), "Theme did not persist");
+            }
+            store.Value.Theme = "invalid"; var rejected = false;
+            try { SettingsStore.Validate(store.Value); } catch (InvalidOperationException) { rejected = true; }
+            Assert(rejected, "Invalid theme accepted"); return Task.CompletedTask;
+        });
         var report = Path.Combine(AppContext.BaseDirectory, "tools", "selftest-results.json");
         AtomicFile.Write(report, new { passed = failures == 0, tests = results });
         Directory.Delete(root, true);

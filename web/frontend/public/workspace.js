@@ -17,7 +17,17 @@
     function chip(item, remove, readonly = false) {
       const node = make('div', 'attachment-chip');
       const name = readonly ? make('a', 'attachment-name', item.name) : make('span', 'attachment-name', item.name);
-      if (readonly) { name.href = '/api/attachments/' + encodeURIComponent(item.id) + '/download'; name.download = item.name; }
+      if (readonly) {
+        name.href = '/api/attachments/' + encodeURIComponent(item.id) + '/download'; name.download = item.name;
+        name.addEventListener('click', async event => {
+          event.preventDefault(); if (name.dataset.downloading) return; name.dataset.downloading = 'true';
+          try {
+            const response = await options.http(name.getAttribute('href')), blob = await response.blob(), url = URL.createObjectURL(blob);
+            const download = document.createElement('a'); download.href = url; download.download = item.name; document.body.append(download); download.click(); download.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+          } catch (error) { notice(error.message || '첨부 파일을 내려받을 수 없습니다.', true); }
+          finally { delete name.dataset.downloading; }
+        });
+      }
       node.append(name, make('span', 'attachment-info', (item.name.split('.').at(-1)?.toUpperCase() || item.kind || '파일') + ' · ' + bytes(item.size || 0)));
       if (item.uploading) { const status = make('span', 'attachment-info'); status.append(make('i', 'blink-dot'), '읽는 중'); node.append(status); }
       if (item.error) { node.append(make('span', 'tag', '오류')); const error = make('span', 'attachment-error', item.error); error.setAttribute('aria-label', item.error); node.append(error); }

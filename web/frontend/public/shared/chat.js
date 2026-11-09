@@ -75,7 +75,7 @@
       const copy = button('복사', () => options.copy(ExaSearch.copyText(message), copy));
       copy.setAttribute('aria-label', message.role === 'user' ? '내 메시지 복사' : '답변 복사'); head.append(copy);
       if (message.role === 'user') {
-        const edit = button('편집', () => { editing = { index, text: message.content }; render(); }, 'message-edit'); edit.disabled = options.busy(); head.append(edit);
+        if (!options.readonly) { const edit = button('편집', () => { editing = { index, text: message.content }; render(); }, 'message-edit'); edit.disabled = options.busy(); head.append(edit); }
         const isEditing = editing?.index === index;
         if (isEditing) {
           article.querySelector('.user-content')?.remove();
@@ -92,7 +92,7 @@
         }
         return article;
       }
-      if (last) { const retry = button('다시 생성', options.retry, 'message-retry'); retry.disabled = options.busy(); head.append(retry); }
+      if (last && !options.readonly) { const retry = button('다시 생성', options.retry, 'message-retry'); retry.disabled = options.busy(); head.append(retry); }
       let details = article.querySelector('.reasoning');
       if (!details) {
         details = make('details', 'reasoning');
@@ -126,7 +126,7 @@
       if (message.error) {
         const line = make('div', 'error-line'); line.append(make('span', 'tag', '오류'), make('p', '', options.errorText(message.error)));
         error.append(line);
-        if (options.needsKey(message.error)) { const actions = make('div', 'error-actions'); actions.append(button('키 설정', options.settings, 'settings-link')); error.append(actions); }
+        if (!options.readonly && options.needsKey(message.error)) { const actions = make('div', 'error-actions'); actions.append(button('키 설정', options.settings, 'settings-link')); error.append(actions); }
       }
       return article;
     }
@@ -137,7 +137,7 @@
         views.set(conversationId, { follow, top });
         for (const form of list.querySelectorAll('.message-editor')) form._attachments?.dispose?.();
         conversationId = c?.id; editing = null; list.replaceChildren();
-        const view = views.get(conversationId); follow = view?.follow ?? true; top = view?.top || 0; userScrollUntil = 0; dragging = false;
+        const view = views.get(conversationId); follow = view?.follow ?? !options.readonly; top = view?.top || 0; userScrollUntil = 0; dragging = false;
       }
       const old = [...list.children], fragment = document.createDocumentFragment();
       const count = c?.messages.length || 0;

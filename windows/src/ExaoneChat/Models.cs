@@ -31,6 +31,7 @@ internal sealed class AppSettings
     public string SearxngUrl { get; set; } = "http://127.0.0.1:8888";
     public string TavilyKey { get; set; } = ""; // DPAPI ciphertext, shared with the local MCP process.
     public string BraveKey { get; set; } = "";
+    public string Theme { get; set; } = "system";
     public WindowPlacement? Window { get; set; }
 }
 internal sealed record WindowPlacement(int X, int Y, int Width, int Height, bool Maximized);

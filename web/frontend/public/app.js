@@ -1,8 +1,10 @@
 'use strict';
 (() => {
+  const publicPath = location.pathname.match(/^\/s\/([^/]+)\/?$/);
+  if (publicPath) { WebExtras.publicView(publicPath[1]); return; }
   const $ = id => document.getElementById(id);
   const state = { settings: { hasKey: false }, config: null, ready: false, conversations: [], current: null, view: 0, deletingKey: false, composing: false, lastFocus: null };
-  let workspace = null;
+  let workspace = null, extras = null;
   const isOfficial = baseUrl => { try { return (state.config?.exaoneStyleHosts || ['api.exaone.ai']).some(host => host.toLowerCase() === new URL(baseUrl).hostname.toLowerCase()); } catch { return false; } };
   const coarse = window.matchMedia('(pointer: coarse)');
   const time = date => new Date(date).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -40,6 +42,7 @@
   }
   async function http(path, method = 'GET', body, options = {}) {
     const { signal, recover = true } = options;
+    if (state.access?.required && !state.access.granted && !['/api/config', '/api/access'].includes(path) && !path.startsWith('/api/access/')) throw { code: 'access_required', status: 401, message: '먼저 로그인해 주세요.' };
     const mutation = method !== 'GET';
     const response = await fetch(path, {
       method, credentials: 'same-origin', signal,
@@ -49,6 +52,7 @@
     if (response.ok) return response;
     const data = await response.json().catch(() => ({}));
     const error = { ...data.error, status: response.status };
+    if (response.status === 401 && error.code === 'access_required') { lockAccess({ required: true, granted: false, configured: true }); throw error; }
     if (response.status === 401 && error.code === 'no_session' && recover) {
       await session();
       ++state.view; state.current = null; chat.endEdit(); chat.follow(); state.conversations = [];
@@ -193,6 +197,17 @@
       if (state.current?.id === id) newConversation(); else refreshGenerationUI();
     }
   });
+  extras = WebExtras.create({ api, http, sessions, chat, current: () => state.current, conversations: () => state.conversations,
+    ready: () => state.ready, access: () => state.access, official: () => isOfficial(state.settings.baseUrl), searchAvailable,
+    openConversation, newConversation, openSettings, closeSettings, closeSidebar, showError,
+    lock: lockAccess, granted: async status => { state.access = status; await startSession(); }
+  });
+  function lockAccess(status) {
+    state.access = status; state.ready = false; ++state.view;
+    for (const run of sessions.runs.values()) run.controller?.abort();
+    state.current = null; state.conversations = []; chat.endEdit(); workspace.clear();
+    extras.showLogin(status);
+  }
   function updateSettingsSummary() {
     const s = state.settings;
     $('keyStatus').classList.toggle('connected', s.hasKey);
@@ -211,6 +226,7 @@
     $('checkConnection').disabled = state.settingsBusy || !state.ready;
     $('newChat').disabled = !state.ready;
     sessions.render();
+    extras?.changed();
   }
   async function refreshList() {
     state.conversations = await request('conversations.list');
@@ -377,6 +393,7 @@
     $('deleteKey').textContent = '키 삭제'; $('deleteKey').disabled = !s.hasKey;
     $('saveResult').textContent = ''; $('connectionResult').replaceChildren();
     $('settingsOverlay').hidden = false; closeSidebar(); updateModalState(); $('settingsPanel').focus();
+    extras?.settingsOpened();
   }
   function closeSettings() {
     searchSettings.clearSecrets();
@@ -440,6 +457,7 @@
   });
   document.addEventListener('keydown', event => {
     if (event.isComposing || event.keyCode === 229) return;
+    if (document.querySelector('dialog[open]') || document.querySelector(':popover-open')) return;
     if (event.key === 'Escape') { if (!$('settingsOverlay').hidden) closeSettings(); else { closeSidebar(); $('toggleList').focus(); } }
     if (event.key === 'Tab' && !$('settingsOverlay').hidden) {
       const all = [...$('settingsPanel').querySelectorAll('button,input,select,textarea,[tabindex]')].filter(el => !el.disabled && el.getClientRects().length);
@@ -535,13 +553,20 @@
     $('messageInput').maxLength = config.limits.maxMessageChars;
     $('systemPrompt').maxLength = config.limits.maxSystemPromptChars;
   }
+  async function startSession() {
+    await session(); state.conversations = await api('/api/conversations'); state.ready = true;
+    extras.unlocked(); renderList(); renderConversation();
+    if (!coarse.matches) (state.settings.hasKey ? $('messageInput') : $('startKey')).focus();
+  }
   async function initialize() {
     try {
       state.config = await api('/api/config'); configureInputs();
-      await session(); state.conversations = await api('/api/conversations'); state.ready = true;
-      renderList(); renderConversation();
-      if (!coarse.matches) (state.settings.hasKey ? $('messageInput') : $('startKey')).focus();
+      state.access = await api('/api/access');
+      if (state.access.required && !state.access.granted) { lockAccess(state.access); return; }
+      await startSession();
     } catch (error) {
+      if (error.code === 'access_required') return;
+      document.body.classList.remove('booting');
       showError(error);
       const retry = make('button', '', '다시 연결'); retry.addEventListener('click', () => { retry.disabled = true; clearError(); initialize(); });
       $('appError').append(retry);

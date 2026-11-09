@@ -12,7 +12,7 @@ textarea{resize:vertical}
 [hidden]{display:none!important}
 a{color:inherit;text-decoration:none}
 .outline{border:1px solid var(--t3);padding:9px 15px;font-weight:600}
-.primary{background:var(--deep);color:var(--t0);padding:10px 24px;font-weight:600;font-size:14px}
+.primary{background:var(--deep);color:var(--on-deep);padding:10px 24px;font-weight:600;font-size:14px}
 .primary:hover{background:color-mix(in oklab,var(--deep) 82%,var(--t4))}
 .primary:disabled{color:var(--on-deep)}
 .sidebar{width:260px;flex-shrink:0;background:var(--t1);display:flex;flex-direction:column}
@@ -23,7 +23,7 @@ a{color:inherit;text-decoration:none}
 .conversation-list{flex:1;min-height:0;overflow:auto;padding:0 12px 24px}
 .conversation-row{position:relative;display:flex;align-items:center;height:42px;margin-bottom:2px}
 .conversation-row:hover{background:var(--t2)}
-.conversation-row.current{background:var(--deep);color:var(--t0)}
+.conversation-row.current{background:var(--deep);color:var(--on-deep)}
 .conversation-open{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;flex:1;min-width:0;height:42px;padding:10px 12px;font-size:13px;background:transparent!important}
 .conversation-delete{display:none;font-size:11px;margin-right:4px;padding:4px 7px}
 .conversation-row:hover .conversation-delete,.conversation-row:focus-within .conversation-delete,.conversation-delete.confirming{display:block}
@@ -63,7 +63,7 @@ main{display:flex;flex:1;min-width:0;flex-direction:column;height:100%}
 .streaming .answer-content::after{content:"";display:block;width:8px;height:16px;margin-top:8px;background:var(--t4);animation:blink 1.1s steps(2,start) infinite}
 .error-block{margin-top:18px;padding:14px 0;border-top:1px solid var(--t3);font-size:13px;line-height:1.7}
 .error-line{display:flex;align-items:flex-start;gap:10px}.error-line p{flex:1}
-.tag{display:inline-block;background:var(--deep);color:var(--t0);padding:2px 7px;font-size:11px;line-height:1.6;flex-shrink:0}
+.tag{display:inline-block;background:var(--deep);color:var(--on-deep);padding:2px 7px;font-size:11px;line-height:1.6;flex-shrink:0}
 .error-actions{display:flex;align-items:center;gap:18px;margin:8px 0 0 43px}
 .error-actions button{font-size:12px;padding:0}.error-actions .settings-link{border-bottom:2px solid var(--t4)}
 .app-error{margin:12px 32px 0;padding:10px 0;border-top:1px solid var(--t4);font-size:13px;color:var(--deep)}
@@ -133,7 +133,7 @@ body{height:100dvh}
 .danger{position:relative;border:1px solid var(--deep);padding:9px 15px;font-weight:600;color:var(--deep);touch-action:none;user-select:none;-webkit-user-select:none}
 .danger::before{content:"";position:absolute;inset:0 auto 0 0;width:var(--hold,0%);background:var(--deep)}
 .danger span{position:relative}
-.danger::after{content:"모든 기록 삭제";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--t0);clip-path:inset(0 calc(100% - var(--hold,0%)) 0 0)}
+.danger::after{content:"모든 기록 삭제";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--on-deep);clip-path:inset(0 calc(100% - var(--hold,0%)) 0 0)}
 .danger:hover{background:var(--t2)}
 @media(hover:none){.conversation-delete{display:block}}
 @media(max-width:600px){:root{--gut:16px}.topbar{padding:0 16px;gap:16px}.topbar h1{max-width:none;flex:1}.model-status{display:none}.empty-state h2{font-size:clamp(32px,9vw,48px)}.empty-content{padding-bottom:24px}.composer-wrap{padding-bottom:calc(12px + env(safe-area-inset-bottom))}.message{padding-top:24px}.settings-panel{width:100%;border-left:0}.settings-header,.settings-footer{padding-left:16px;padding-right:16px}.settings-fields{padding-left:16px;padding-right:16px}.app-error{margin-left:16px;margin-right:16px}.start-row{gap:8px}.user-content{padding:14px 16px}}

@@ -64,7 +64,7 @@ def main():
                 expect(page.locator("#startButton")).to_be_enabled()
                 expect(page.locator("#welcomeTitle")).to_have_text("API 키만 넣으면 바로 시작.")
                 assert page.title() == "EXAONE"
-                assert [url.removeprefix(BASE) for method, url, _ in calls if "/api/" in url][:2] == ["/api/config", "/api/session"]
+                assert [url.removeprefix(BASE) for method, url, _ in calls if "/api/" in url][:3] == ["/api/config", "/api/access", "/api/session"]
                 assert page.locator("#messageInput").get_attribute("maxlength") == "32000"
                 assert page.locator("#systemPrompt").get_attribute("maxlength") == "8000"
                 no_overflow(page)

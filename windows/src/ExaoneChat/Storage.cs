@@ -61,7 +61,7 @@ internal sealed class SettingsStore
         try { key = Key(); } catch { key = ""; }
         return new { hasKey = key.Length > 0, keySuffix = key.Length > 0 ? key[^Math.Min(4, key.Length)..] : "",
             s.BaseUrl, s.Model, s.SystemPrompt, s.Temperature, s.TopP, s.MaxTokens, s.Thinking, s.ReasoningEffort,
-            s.WebSearch, s.SearchProvider, s.SearxngUrl,
+            s.WebSearch, s.SearchProvider, s.SearxngUrl, s.Theme,
             searchKeys = new { tavily = KeySummary(s.TavilyKey), brave = KeySummary(s.BraveKey) },
             search = new { available = SearchService.ChooseProvider(s.SearchProvider, s.TavilyKey.Length > 0, s.BraveKey.Length > 0, serverReady == false ? "" : s.SearxngUrl) is not null,
                 serverProvider = serverReady != false && s.SearxngUrl.Length > 0 ? "searxng" : null, providers = new[] { "searxng", "tavily", "brave" } } };
@@ -76,6 +76,7 @@ internal sealed class SettingsStore
         s.TopP = input.GetProperty("topP").GetDouble();
         s.MaxTokens = input.GetProperty("maxTokens").GetInt32();
         if (input.TryGetProperty("thinking", out var thinking)) s.Thinking = thinking.GetBoolean();
+        if (input.TryGetProperty("theme", out var theme)) s.Theme = theme.GetString() ?? "system";
         if (input.TryGetProperty("reasoningEffort", out var effort)) s.ReasoningEffort = effort.GetString() ?? "max";
         if (input.TryGetProperty("webSearch", out var search)) s.WebSearch = search.GetBoolean();
         if (input.TryGetProperty("searchProvider", out var provider)) s.SearchProvider = provider.GetString() ?? "auto";
@@ -94,6 +95,7 @@ internal sealed class SettingsStore
     }
     public static void Validate(AppSettings s)
     {
+        if (s.Theme is not ("light" or "dark" or "system")) throw new InvalidOperationException("화면 모드를 확인하세요.");
         if (!Uri.TryCreate(s.BaseUrl, UriKind.Absolute, out var uri) ||
             (uri.Scheme != "https" && !(uri.Scheme == "http" && uri.IsLoopback)) ||
             uri.UserInfo.Length > 0 || uri.Query.Length > 0 || uri.Fragment.Length > 0)
