@@ -1,7 +1,9 @@
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
-  const defaults = { hasKey: false, keySuffix: '', baseUrl: 'https://api.friendli.ai/serverless/v1', model: 'LGAI-EXAONE/K-EXAONE-2.0-750B-A37B', systemPrompt: '', temperature: 1, topP: .95, maxTokens: 8192, thinking: true };
+  const defaults = { hasKey: false, keySuffix: '', baseUrl: 'https://api.exaone.ai/v1', model: 'k-exaone_v2.5', systemPrompt: '', temperature: 1, topP: .95, maxTokens: 8192, thinking: true, reasoningEffort: 'max' };
+  const isOfficial = baseUrl => { try { return new URL(baseUrl).hostname === 'api.exaone.ai'; } catch { return false; } };
+  const authGuidance = 'API 키나 주소를 확인하세요. EXAONE API 키는 https://api.exaone.ai/v1 에서 씁니다.';
   const state = { settings: { ...defaults }, conversations: [], current: null, busy: false, stream: null, view: 0, deletingKey: false, composing: false, lastFocus: null };
   const time = date => new Date(date).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
   const clone = value => JSON.parse(JSON.stringify(value));
@@ -40,7 +42,7 @@
     $('keyStatus').lastElementChild.textContent = s.hasKey ? '키 있음' : '키 없음';
     $('modelLabel').textContent = state.current?.model || s.model;
     $('modelLabel').title = state.current?.model || s.model;
-    $('thinkingLabel').textContent = s.thinking ? '생각 켬' : '생각 끔';
+    $('thinkingLabel').textContent = isOfficial(s.baseUrl) ? `추론 ${{ low: '낮음', high: '높음', max: '최대' }[s.reasoningEffort] || '최대'}` : s.thinking ? '생각 켬' : '생각 끔';
     $('welcomeTitle').textContent = s.hasKey ? '무엇이든 물어보세요.' : 'API 키부터 넣어주세요.';
     if (s.hasKey) $('welcomeTitle').innerHTML = '무엇이든<br>물어보세요.';
     $('welcomeText').textContent = s.hasKey ? '질문, 글, 코드. 무엇이든 EXAONE에게.' : '설정에 키를 저장하면 바로 대화할 수 있습니다.';
@@ -154,7 +156,7 @@
     return article;
   }
   function renderMarkdown(container, text) {
-    container.innerHTML = DOMPurify.sanitize(marked.parse(text, { breaks: true, gfm: true }), {
+    container.innerHTML = DOMPurify.sanitize(marked.parse(text.trimStart(), { breaks: true, gfm: true }), {
       FORBID_TAGS: ['img', 'style', 'script', 'iframe', 'form', 'input', 'button', 'video', 'audio', 'svg', 'math'],
       FORBID_ATTR: ['style', 'src', 'srcset', 'id', 'name'], ALLOW_DATA_ATTR: false
     });
@@ -252,7 +254,7 @@
         } else if (event.event === 'content' || event.event === 'reasoning') {
           const message = state.stream?.messages.at(-1);
           if (!message) return;
-          if (event.event === 'content') message.content += event.text; else message.reasoning = (message.reasoning || '') + event.text;
+          if (event.event === 'content') message.content = (message.content + event.text).trimStart(); else message.reasoning = (message.reasoning || '') + event.text;
           scheduleAnswerRender();
         } else if (event.event === 'error') {
           const message = state.stream?.messages.at(-1);
@@ -284,6 +286,9 @@
     const s = state.settings;
     for (const id of ['baseUrl', 'model', 'systemPrompt', 'temperature', 'topP', 'maxTokens']) $(id).value = s[id];
     $('temperatureRange').value = s.temperature; $('topPRange').value = s.topP; $('thinking').checked = s.thinking;
+    const effort = ['low', 'high', 'max'].includes(s.reasoningEffort) ? s.reasoningEffort : 'max';
+    document.querySelector(`input[name="reasoningEffort"][value="${effort}"]`).checked = true;
+    updateProviderFields();
     $('apiKey').value = ''; $('apiKey').placeholder = s.hasKey ? `저장됨 ••••${s.keySuffix}` : 'API 키 입력';
     $('keyNote').textContent = s.hasKey ? '빈칸으로 저장하면 기존 키를 유지합니다.' : '이 Windows 계정에서 암호화해 저장합니다.';
     $('deleteKey').textContent = '키 삭제'; $('deleteKey').disabled = !s.hasKey;
@@ -294,9 +299,16 @@
     $('apiKey').value = ''; $('settingsOverlay').hidden = true;
     state.lastFocus?.focus();
   }
+  function updateProviderFields() {
+    const official = isOfficial($('baseUrl').value.trim());
+    $('officialReasoning').hidden = !official;
+    $('thinkingRow').hidden = official;
+    $('maxTokens').max = official ? '524288' : '1048576';
+  }
   function settingsPayload() {
     return { baseUrl: $('baseUrl').value.trim(), model: $('model').value.trim(), systemPrompt: $('systemPrompt').value,
       temperature: Number($('temperature').value), topP: Number($('topP').value), maxTokens: Number($('maxTokens').value), thinking: $('thinking').checked,
+      reasoningEffort: document.querySelector('input[name="reasoningEffort"]:checked').value,
       newApiKey: $('apiKey').value.trim(), deleteKey: state.deletingKey };
   }
   async function saveSettings(event) {
@@ -327,6 +339,8 @@
   for (const id of ['openSettings', 'welcomeSettings']) $(id).addEventListener('click', openSettings);
   for (const id of ['closeSettings', 'cancelSettings', 'settingsShade']) $(id).addEventListener('click', closeSettings);
   $('settingsForm').addEventListener('submit', saveSettings);
+  $('baseUrl').addEventListener('input', updateProviderFields);
+  $('baseUrl').addEventListener('change', updateProviderFields);
   $('checkConnection').addEventListener('click', checkConnection);
   $('deleteKey').addEventListener('click', () => {
     state.deletingKey = !state.deletingKey; $('apiKey').value = '';
@@ -394,7 +408,7 @@
             if (newApiKey) { settings.hasKey = true; settings.keySuffix = newApiKey.slice(-4); }
             reply(settings); break;
           }
-          case 'connection.check': validate(p); await pause(450); if (!(p.newApiKey || settings.hasKey) || (p.deleteKey && !p.newApiKey)) throw { message: 'API 키를 확인하세요.', status: 401, auth: true }; reply({ message: '연결됨' }); break;
+          case 'connection.check': validate(p); await pause(450); if (!(p.newApiKey || settings.hasKey) || (p.deleteKey && !p.newApiKey)) throw { message: authGuidance, status: 401, auth: true }; reply({ message: '연결됨' }); break;
           case 'conversations.list': reply(list()); break;
           case 'conversations.get': reply(items.find(x => x.id === p.id)); break;
           case 'conversations.delete': items.splice(items.findIndex(x => x.id === p.id), 1); reply(list()); break;
@@ -411,13 +425,13 @@
             stream = { stopped: false }; const active = stream;
             emit('start', { conversation: c });
             const reason = '먼저 질문의 의도와 필요한 정보를 살펴봅니다.\n핵심을 작은 단계로 나눕니다.\n예시와 함께 답변을 정리합니다.';
-            if (settings.thinking) for (const line of reason.match(/.{1,8}|\n/g) || []) {
+            if (isOfficial(settings.baseUrl) || settings.thinking) for (const line of reason.match(/.{1,8}|\n/g) || []) {
               if (active.stopped) break;
               answer.reasoning += line; emit('reasoning', { text: line, conversationId: c.id }); await pause(65);
             }
             for (const text of example.match(/[\s\S]{1,12}/g) || []) {
               if (active.stopped) break;
-              answer.content += text; emit('content', { text, conversationId: c.id }); await pause(35);
+              answer.content = (answer.content + text).trimStart(); emit('content', { text, conversationId: c.id }); await pause(35);
             }
             c.updatedAt = new Date().toISOString(); stream = null;
             receive({ reqId, event: 'done', ok: true, result: clone({ conversation: c, stopped: active.stopped, error: null }) });
@@ -431,6 +445,7 @@
       let url; try { url = new URL(p.baseUrl); } catch { throw { message: 'Base URL을 확인하세요.' }; }
       if (!['http:', 'https:'].includes(url.protocol) || !p.model.trim()) throw { message: '연결 설정을 확인하세요.' };
       if (p.temperature < 0 || p.temperature > 2 || p.topP <= 0 || p.topP > 1 || p.maxTokens < 1) throw { message: '응답 설정 범위를 확인하세요.' };
+      if (!['low', 'high', 'max'].includes(p.reasoningEffort) || p.maxTokens > (isOfficial(p.baseUrl) ? 524288 : 1048576)) throw { message: '응답 설정 범위를 확인하세요.' };
     }
     return { postMessage };
   }

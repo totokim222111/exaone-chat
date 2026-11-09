@@ -12,14 +12,20 @@ internal static class Json
 
 internal sealed class AppSettings
 {
+    public const int CurrentSchemaVersion = 1;
+    public const string DefaultBaseUrl = "https://api.exaone.ai/v1";
+    public const string DefaultModel = "k-exaone_v2.5";
+    // Missing in legacy JSON: leave at zero so SettingsStore can migrate once.
+    public int SchemaVersion { get; set; }
     public string ApiKey { get; set; } = ""; // DPAPI ciphertext only.
-    public string BaseUrl { get; set; } = "https://api.friendli.ai/serverless/v1";
-    public string Model { get; set; } = "LGAI-EXAONE/K-EXAONE-2.0-750B-A37B";
+    public string BaseUrl { get; set; } = DefaultBaseUrl;
+    public string Model { get; set; } = DefaultModel;
     public string SystemPrompt { get; set; } = "";
     public double Temperature { get; set; } = 1.0;
     public double TopP { get; set; } = 0.95;
     public int MaxTokens { get; set; } = 8192;
     public bool Thinking { get; set; } = true;
+    public string ReasoningEffort { get; set; } = "max";
     public WindowPlacement? Window { get; set; }
 }
 internal sealed record WindowPlacement(int X, int Y, int Width, int Height, bool Maximized);

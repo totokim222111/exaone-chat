@@ -12,27 +12,51 @@ internal sealed class ApiException(string message, int? status = null) : Excepti
 
 internal sealed class ApiClient : IDisposable
 {
+    internal const string AuthGuidance = "API 키나 주소를 확인하세요. EXAONE API 키는 https://api.exaone.ai/v1 에서 씁니다.";
     private readonly HttpClient http = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
-    internal static Dictionary<string, object> Body(AppSettings s, IEnumerable<ChatMessage> messages, bool stream)
+    // Pure request builder: host is explicit so provider behavior can be tested offline.
+    internal static Dictionary<string, object> Body(AppSettings s, IEnumerable<ChatMessage> messages, bool stream, string host)
     {
+        var official = host.Equals("api.exaone.ai", StringComparison.OrdinalIgnoreCase);
         var history = new List<object>();
         if (stream && !string.IsNullOrWhiteSpace(s.SystemPrompt)) history.Add(new { role = "system", content = s.SystemPrompt });
         history.AddRange(messages.Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Content))
             .Select(m => (object)new { role = m.Role, content = m.Content }));
         var body = new Dictionary<string, object> { ["model"] = s.Model, ["messages"] = history,
             ["stream"] = stream, ["temperature"] = s.Temperature, ["top_p"] = s.TopP,
-            ["max_tokens"] = stream ? s.MaxTokens : 8,
-            ["chat_template_kwargs"] = new { enable_thinking = stream && s.Thinking } };
-        if (new Uri(s.BaseUrl).Host.Equals("api.friendli.ai", StringComparison.OrdinalIgnoreCase)) body["parse_reasoning"] = true;
+            ["max_tokens"] = stream ? s.MaxTokens : official ? 64 : 8 };
+        if (official)
+        {
+            body["reasoning_effort"] = stream ? s.ReasoningEffort : "low";
+            if (stream) body["stream_options"] = new { include_usage = true };
+        }
+        else body["chat_template_kwargs"] = new { enable_thinking = stream && s.Thinking };
+        if (host.Equals("api.friendli.ai", StringComparison.OrdinalIgnoreCase)) body["parse_reasoning"] = true;
         return body;
+    }
+    internal static string ErrorDetail(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            static string? Text(JsonElement node, string property) => node.ValueKind == JsonValueKind.Object &&
+                node.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String &&
+                !string.IsNullOrWhiteSpace(value.GetString()) ? value.GetString() : null;
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out var error) && Text(error, "message") is { } first) return first;
+            if (Text(root, "description") is { } description) return description;
+            if (Text(root, "message") is { } message) return message;
+        }
+        catch (JsonException) { }
+        return body[..Math.Min(body.Length, 300)];
     }
     private async Task<HttpResponseMessage> Request(AppSettings s, string key, IEnumerable<ChatMessage> messages, bool stream, CancellationToken ct)
     {
         SettingsStore.Validate(s);
-        if (string.IsNullOrWhiteSpace(key)) throw new ApiException("API 키를 확인하세요. 설정에서 키를 입력하세요.", 401);
+        if (string.IsNullOrWhiteSpace(key)) throw new ApiException(AuthGuidance, 401);
         using var req = new HttpRequestMessage(HttpMethod.Post, s.BaseUrl.TrimEnd('/') + "/chat/completions");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-        req.Content = new StringContent(Json.Serialize(Body(s, messages, stream)), Encoding.UTF8, "application/json");
+        req.Content = new StringContent(Json.Serialize(Body(s, messages, stream, new Uri(s.BaseUrl).Host)), Encoding.UTF8, "application/json");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(120));
         HttpResponseMessage response;
@@ -43,11 +67,9 @@ internal sealed class ApiClient : IDisposable
             using (response)
             {
                 var body = await response.Content.ReadAsStringAsync(timeout.Token);
-                string detail;
-                try { using var doc = JsonDocument.Parse(body); detail = doc.RootElement.GetProperty("error").GetProperty("message").GetString() ?? body; }
-                catch { detail = body[..Math.Min(body.Length, 300)]; }
+                var detail = ErrorDetail(body);
                 detail = detail.Replace(key, "[키 숨김]", StringComparison.Ordinal);
-                throw new ApiException($"HTTP {(int)response.StatusCode} · {detail}" + ((int)response.StatusCode is 401 or 403 ? " · API 키를 확인하세요." : ""), (int)response.StatusCode);
+                throw new ApiException($"HTTP {(int)response.StatusCode} · {detail}" + ((int)response.StatusCode is 401 or 403 ? " · " + AuthGuidance : ""), (int)response.StatusCode);
             }
         }
         return response;
@@ -59,15 +81,24 @@ internal sealed class ApiClient : IDisposable
         try
         {
             using var res = await Request(s, key, [new() { Content = "hi" }], false, timeout.Token);
-            using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(timeout.Token));
-            if (!doc.RootElement.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-                throw new ApiException("응답 형식이 올바르지 않습니다.");
+            // A successful HTTP response verifies key/model, even when all tokens went to reasoning.
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new ApiException("연결 확인 시간이 초과되었습니다."); }
     }
     public async Task Stream(AppSettings s, string key, IEnumerable<ChatMessage> messages, Action<string, string> emit, CancellationToken ct)
     {
-        var splitter = new ReasoningSplitter(emit);
+        var contentStarted = false;
+        void Emit(string kind, string value)
+        {
+            if (kind == "content" && !contentStarted)
+            {
+                value = value.TrimStart();
+                if (value.Length == 0) return;
+                contentStarted = true;
+            }
+            emit(kind, value);
+        }
+        var splitter = new ReasoningSplitter(Emit);
         try
         {
             using var res = await Request(s, key, messages, true, ct);
@@ -84,8 +115,8 @@ internal sealed class ApiClient : IDisposable
                 {
                     using var doc = JsonDocument.Parse(payload);
                     var root = doc.RootElement;
-                    if (root.TryGetProperty("error", out var error))
-                        throw new ApiException(error.GetProperty("message").GetString()?.Replace(key, "[키 숨김]", StringComparison.Ordinal) ?? "스트림 오류");
+                    if (root.TryGetProperty("error", out _) || (!root.TryGetProperty("choices", out _) && root.TryGetProperty("result_code", out _)))
+                        throw new ApiException(ErrorDetail(payload).Replace(key, "[키 숨김]", StringComparison.Ordinal));
                     if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0) return;
                     if (!choices[0].TryGetProperty("delta", out var delta)) return;
                     if (delta.TryGetProperty("reasoning_content", out var reason) && reason.ValueKind == JsonValueKind.String && reason.GetString() is { Length: > 0 } r) emit("reasoning", r);

@@ -9,12 +9,13 @@ LG AI연구원의 EXAONE 모델과 대화하는 챗봇입니다. API 키만 넣�
 
 ## API 키
 
-EXAONE은 [FriendliAI](https://friendli.ai)가 OpenAI 호환 API로 제공합니다. FriendliAI에서 키를 발급받아 앱 설정에 넣으면 됩니다.
+LG AI연구원의 [EXAONE API Platform](https://docs.exaone.ai)에서 키를 발급받아 앱 설정에 넣으면 됩니다. OpenAI 호환 API입니다.
 
-- 기본 주소: `https://api.friendli.ai/serverless/v1`
-- 기본 모델: `LGAI-EXAONE/K-EXAONE-2.0-750B-A37B`
+- 기본 주소: `https://api.exaone.ai/v1`
+- 기본 모델: `k-exaone_v2.5` ([문서](https://docs.exaone.ai/ko/docs/k-exaone-2.5))
+- K-EXAONE 2.5는 항상 생각 과정을 거친 뒤 답합니다. 설정의 **추론 강도**(낮음 / 높음 / 최대)로 생각하는 양을 조절합니다.
 
-주소와 모델은 설정에서 바꿀 수 있어서, vLLM 같은 OpenAI 호환 서버로 직접 띄운 EXAONE에도 연결할 수 있습니다.
+주소와 모델은 설정에서 바꿀 수 있습니다. FriendliAI(`https://api.friendli.ai/serverless/v1`)나 vLLM처럼 OpenAI 호환으로 띄운 EXAONE에도 연결할 수 있고, 이때는 추론 강도 대신 **생각 모드** 스위치가 나옵니다.
 
 ## 윈도우 앱
 
@@ -28,7 +29,7 @@ EXAONE은 [FriendliAI](https://friendli.ai)가 OpenAI 호환 API로 제공합니
 ### 기능
 
 - 답변을 실시간으로 받아 보여주고, 중간에 멈출 수 있습니다.
-- 생각 모드: EXAONE의 추론 과정을 접힌 블록으로 따로 보여줍니다.
+- EXAONE의 생각 과정을 접힌 블록으로 따로 보여줍니다.
 - 마크다운, 코드 블록, 표 렌더링과 복사
 - 대화 기록 저장, 제목 변경(더블클릭), 삭제
 - Temperature, Top P, 최대 토큰, 시스템 프롬프트 설정

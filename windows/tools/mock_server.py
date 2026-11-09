@@ -27,6 +27,8 @@ class Handler(BaseHTTPRequestHandler):
             mode = self.path.strip('/').split('/')[0]
             if mode == 'unauthorized':
                 return self.json_response(401, {'error': {'message': 'invalid key mock-key'}})
+            if mode == 'exaone401':
+                return self.json_response(401, {'result_code': 'UNAUTHORIZED', 'description': '공식 키 오류', 'message': 'fallback'})
             if mode == 'forbidden':
                 data = ('denied ' * 100).encode()
                 self.send_response(403)
@@ -43,6 +45,8 @@ class Handler(BaseHTTPRequestHandler):
                 assert body['messages'] == [{'role': 'user', 'content': 'hi'}]
                 assert body['max_tokens'] == 8
                 assert body['chat_template_kwargs'] == {'enable_thinking': False}
+                if mode == 'checkempty':
+                    return self.json_response(200, {'choices': [{'message': {'role': 'assistant', 'reasoning_content': '생각', 'content': ''}}]})
                 return self.json_response(200, {'choices': [{'message': {'role': 'assistant', 'content': 'hi'}}]})
             assert body['max_tokens'] == 8192
             assert body['chat_template_kwargs'] == {'enable_thinking': True}
@@ -68,6 +72,23 @@ class Handler(BaseHTTPRequestHandler):
             elif mode == 'thought':
                 for text in ['<th', 'ought>다른 ', '생각</tho', 'ught>답변']:
                     chunk(content=text)
+            elif mode == 'usage':
+                chunk(reasoning_content='사용량 생각')
+                self.wfile.write(b'data: {"choices": [], "usage": {"completion_tokens": 2}}\r\n\r\n')
+                chunk(content='사용량 답변')
+                self.wfile.write(b'data: {"choices": [], "usage": {"total_tokens": 12}}\r\n\r\n')
+            elif mode == 'leading':
+                for text in ['\n', '\n  ', '<thi', 'nk>생각</think>', '\n\n', '  첫 줄', '\n\n  둘째 줄  ']:
+                    chunk(content=text)
+            elif mode == 'fragmented':
+                payload = ''.join('data: ' + json.dumps({'choices': [{'delta': delta}]}, ensure_ascii=False) + '\r\n\r\n'
+                                  for delta in [{'reasoning_content': '잘린 줄 생각'}, {'content': '잘린 줄 답변'}])
+                data = (payload + 'data: [DONE]\r\n\r\n').encode('utf-8')
+                for start in range(0, len(data), 3):
+                    self.wfile.write(data[start:start + 3])
+                    self.wfile.flush()
+                    time.sleep(.001)
+                return
             elif mode == 'slow':
                 chunk(content='부분 응답')
                 time.sleep(3)

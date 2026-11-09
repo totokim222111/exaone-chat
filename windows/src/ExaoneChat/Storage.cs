@@ -27,7 +27,19 @@ internal sealed class SettingsStore
     {
         Directory.CreateDirectory(root);
         path = Path.Combine(root, "settings.json");
-        Value = File.Exists(path) ? Json.Read<AppSettings>(File.ReadAllText(path)) : new();
+        Value = File.Exists(path) ? Json.Read<AppSettings>(File.ReadAllText(path)) : new() { SchemaVersion = AppSettings.CurrentSchemaVersion };
+        if (Migrate(Value)) Save();
+    }
+    internal static bool Migrate(AppSettings value)
+    {
+        if (value.SchemaVersion >= AppSettings.CurrentSchemaVersion) return false;
+        if (value.BaseUrl == "https://api.friendli.ai/serverless/v1" && value.Model == "LGAI-EXAONE/K-EXAONE-2.0-750B-A37B")
+        {
+            value.BaseUrl = AppSettings.DefaultBaseUrl;
+            value.Model = AppSettings.DefaultModel;
+        }
+        value.SchemaVersion = AppSettings.CurrentSchemaVersion;
+        return true;
     }
     public string Key()
     {
@@ -42,7 +54,7 @@ internal sealed class SettingsStore
         string key;
         try { key = Key(); } catch { key = ""; }
         return new { hasKey = key.Length > 0, keySuffix = key.Length > 0 ? key[^Math.Min(4, key.Length)..] : "",
-            s.BaseUrl, s.Model, s.SystemPrompt, s.Temperature, s.TopP, s.MaxTokens, s.Thinking };
+            s.BaseUrl, s.Model, s.SystemPrompt, s.Temperature, s.TopP, s.MaxTokens, s.Thinking, s.ReasoningEffort };
     }
     public AppSettings Draft(JsonElement input)
     {
@@ -54,6 +66,7 @@ internal sealed class SettingsStore
         s.TopP = input.GetProperty("topP").GetDouble();
         s.MaxTokens = input.GetProperty("maxTokens").GetInt32();
         s.Thinking = input.GetProperty("thinking").GetBoolean();
+        if (input.TryGetProperty("reasoningEffort", out var effort)) s.ReasoningEffort = effort.GetString() ?? "max";
         Validate(s);
         if (input.TryGetProperty("deleteKey", out var del) && del.GetBoolean()) s.ApiKey = "";
         if (input.TryGetProperty("newApiKey", out var value) && !string.IsNullOrWhiteSpace(value.GetString()))
@@ -74,6 +87,9 @@ internal sealed class SettingsStore
         if (!double.IsFinite(s.Temperature) || s.Temperature is < 0 or > 2) throw new InvalidOperationException("Temperature는 0–2 사이여야 합니다.");
         if (!double.IsFinite(s.TopP) || s.TopP is <= 0 or > 1) throw new InvalidOperationException("Top P는 0 초과 1 이하여야 합니다.");
         if (s.MaxTokens is < 1 or > 1048576) throw new InvalidOperationException("최대 토큰은 1–1048576 사이여야 합니다.");
+        if (uri.Host.Equals("api.exaone.ai", StringComparison.OrdinalIgnoreCase) && s.MaxTokens > 524288)
+            throw new InvalidOperationException("EXAONE API의 입력과 최대 토큰 합계는 524288 이하여야 합니다.");
+        if (s.ReasoningEffort is not ("low" or "high" or "max")) throw new InvalidOperationException("추론 강도를 확인하세요.");
     }
     public static string Decrypt(AppSettings s) => s.ApiKey.Length == 0 ? "" : Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(s.ApiKey), null, DataProtectionScope.CurrentUser));
     public void Save(AppSettings? value = null)

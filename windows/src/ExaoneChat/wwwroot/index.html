@@ -23,7 +23,7 @@
     <header class="topbar">
       <button id="toggleList" aria-expanded="false" aria-controls="sidebar">목록</button>
       <h1 id="chatTitle">새 대화</h1>
-      <div class="model-status"><span id="modelLabel"></span><span id="thinkingLabel">생각 켬</span></div>
+      <div class="model-status"><span id="modelLabel"></span><span id="thinkingLabel">추론 최대</span></div>
     </header>
     <div id="appError" class="app-error" role="alert" hidden></div>
     <div id="messageScroll" class="message-scroll">
@@ -48,13 +48,21 @@
         <div class="settings-fields">
           <section class="settings-section"><h3>연결</h3>
             <div class="field"><div class="field-label"><label for="apiKey">API 키</label><button id="deleteKey" type="button">키 삭제</button></div><input id="apiKey" type="password" placeholder="API 키 입력" autocomplete="off" spellcheck="false"><p id="keyNote" class="field-note">이 Windows 계정에서 암호화해 저장합니다.</p></div>
-            <div class="field"><label for="baseUrl">Base URL</label><input id="baseUrl" type="url" required spellcheck="false"></div>
-            <div class="field"><label for="model">모델</label><input id="model" list="modelOptions" required spellcheck="false"><datalist id="modelOptions"><option value="LGAI-EXAONE/K-EXAONE-2.0-750B-A37B"></option><option value="LGAI-EXAONE/K-EXAONE-236B-A23B"></option><option value="LGAI-EXAONE/EXAONE-4.0.1-32B"></option></datalist></div>
+            <div class="field"><label for="baseUrl">Base URL</label><input id="baseUrl" type="url" list="baseUrlOptions" required spellcheck="false"><datalist id="baseUrlOptions"><option value="https://api.exaone.ai/v1"></option><option value="https://api.friendli.ai/serverless/v1"></option></datalist></div>
+            <div class="field"><label for="model">모델</label><input id="model" list="modelOptions" required spellcheck="false"><datalist id="modelOptions"><option value="k-exaone_v2.5"></option><option value="LGAI-EXAONE/K-EXAONE-2.0-750B-A37B"></option><option value="LGAI-EXAONE/K-EXAONE-236B-A23B"></option><option value="LGAI-EXAONE/EXAONE-4.0.1-32B"></option></datalist></div>
             <button id="checkConnection" class="outline" type="button">연결 확인</button>
             <div id="connectionResult" class="connection-result" role="status"></div>
           </section>
           <section class="settings-section"><h3>응답</h3>
-            <div class="switch-row"><label for="thinking">생각 모드</label><input id="thinking" class="square-switch" type="checkbox" role="switch"></div>
+            <div id="officialReasoning" class="field">
+              <fieldset class="effort-field"><legend>추론 강도</legend><div class="effort-options">
+                <label><input type="radio" name="reasoningEffort" value="low"><span>낮음</span></label>
+                <label><input type="radio" name="reasoningEffort" value="high"><span>높음</span></label>
+                <label><input type="radio" name="reasoningEffort" value="max" checked><span>최대</span></label>
+              </div></fieldset>
+              <p class="reasoning-note">EXAONE API는 항상 생각 과정을 거칩니다.</p>
+            </div>
+            <div id="thinkingRow" class="switch-row" hidden><label for="thinking">생각 모드</label><input id="thinking" class="square-switch" type="checkbox" role="switch"></div>
             <div class="field"><label for="temperature">Temperature</label><div class="range-row"><input id="temperatureRange" aria-label="Temperature 슬라이더" type="range" min="0" max="2" step="0.05"><input id="temperature" type="number" min="0" max="2" step="0.05" required></div></div>
             <div class="field"><label for="topP">Top P</label><div class="range-row"><input id="topPRange" aria-label="Top P 슬라이더" type="range" min="0.01" max="1" step="0.01"><input id="topP" type="number" min="0.01" max="1" step="0.01" required></div></div>
             <div class="field"><label for="maxTokens">최대 토큰</label><input id="maxTokens" type="number" min="1" max="1048576" step="1" required></div>
