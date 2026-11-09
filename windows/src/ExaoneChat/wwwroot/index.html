@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; font-src https://cdn.jsdelivr.net; img-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>EXAONE</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="app.css">
+  <script defer src="vendor/marked.min.js"></script>
+  <script defer src="vendor/purify.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <button id="sidebarShade" class="sidebar-shade" aria-label="목록 닫기" hidden></button>
+  <aside id="sidebar" class="sidebar" aria-label="대화 목록">
+    <div class="brand">EXAONE</div>
+    <div class="sidebar-actions"><button id="newChat" class="outline" title="새 대화 (Ctrl+N)">새 대화<span class="shortcut" aria-hidden="true">Ctrl N</span></button></div>
+    <nav id="conversationList" class="conversation-list" aria-label="저장된 대화"></nav>
+    <footer class="sidebar-footer"><button id="openSettings">설정</button><span id="keyStatus" class="status"><i></i><span>키 없음</span></span></footer>
+  </aside>
+  <main>
+    <header class="topbar">
+      <button id="toggleList" aria-expanded="false" aria-controls="sidebar">목록</button>
+      <h1 id="chatTitle">새 대화</h1>
+      <div class="model-status"><span id="modelLabel"></span><span id="thinkingLabel">생각 켬</span></div>
+    </header>
+    <div id="appError" class="app-error" role="alert" hidden></div>
+    <div id="messageScroll" class="message-scroll">
+      <section id="emptyState" class="empty-state">
+        <div class="empty-content"><h2 id="welcomeTitle">무엇이든<br>물어보세요.</h2><p id="welcomeText">질문, 글, 코드. 무엇이든 EXAONE에게.</p><button id="welcomeSettings" class="primary" hidden>설정 열기</button></div>
+      </section>
+      <section id="messages" class="messages" aria-label="메시지" hidden></section>
+    </div>
+    <div class="composer-wrap">
+      <form id="composer" class="composer">
+        <textarea id="messageInput" rows="1" placeholder="메시지를 입력하세요" aria-label="메시지" maxlength="200000"></textarea>
+        <div class="composer-bottom"><span id="streamStatus" class="status" aria-live="polite"></span><button id="sendButton" class="primary" type="submit">보내기</button></div>
+      </form>
+      <p class="input-hint">Enter 보내기 · Shift+Enter 줄바꿈</p>
+    </div>
+  </main>
+  <div id="settingsOverlay" class="settings-overlay" hidden>
+    <button id="settingsShade" class="settings-shade" aria-label="설정 닫기"></button>
+    <section id="settingsPanel" class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" tabindex="-1">
+      <header class="settings-header"><h2 id="settingsTitle">설정</h2><button id="closeSettings">닫기</button></header>
+      <form id="settingsForm">
+        <div class="settings-fields">
+          <section class="settings-section"><h3>연결</h3>
+            <div class="field"><div class="field-label"><label for="apiKey">API 키</label><button id="deleteKey" type="button">키 삭제</button></div><input id="apiKey" type="password" placeholder="API 키 입력" autocomplete="off" spellcheck="false"><p id="keyNote" class="field-note">이 Windows 계정에서 암호화해 저장합니다.</p></div>
+            <div class="field"><label for="baseUrl">Base URL</label><input id="baseUrl" type="url" required spellcheck="false"></div>
+            <div class="field"><label for="model">모델</label><input id="model" list="modelOptions" required spellcheck="false"><datalist id="modelOptions"><option value="LGAI-EXAONE/K-EXAONE-2.0-750B-A37B"></option><option value="LGAI-EXAONE/K-EXAONE-236B-A23B"></option><option value="LGAI-EXAONE/EXAONE-4.0.1-32B"></option></datalist></div>
+            <button id="checkConnection" class="outline" type="button">연결 확인</button>
+            <div id="connectionResult" class="connection-result" role="status"></div>
+          </section>
+          <section class="settings-section"><h3>응답</h3>
+            <div class="switch-row"><label for="thinking">생각 모드</label><input id="thinking" class="square-switch" type="checkbox" role="switch"></div>
+            <div class="field"><label for="temperature">Temperature</label><div class="range-row"><input id="temperatureRange" aria-label="Temperature 슬라이더" type="range" min="0" max="2" step="0.05"><input id="temperature" type="number" min="0" max="2" step="0.05" required></div></div>
+            <div class="field"><label for="topP">Top P</label><div class="range-row"><input id="topPRange" aria-label="Top P 슬라이더" type="range" min="0.01" max="1" step="0.01"><input id="topP" type="number" min="0.01" max="1" step="0.01" required></div></div>
+            <div class="field"><label for="maxTokens">최대 토큰</label><input id="maxTokens" type="number" min="1" max="1048576" step="1" required></div>
+            <div class="field"><label for="systemPrompt">시스템 프롬프트</label><textarea id="systemPrompt" rows="4" placeholder="응답 방식이나 역할을 지정하세요"></textarea></div>
+          </section>
+        </div>
+        <footer class="settings-footer"><div><button id="saveSettings" class="primary" type="submit">저장</button><button id="cancelSettings" type="button">취소</button></div><p id="saveResult" role="status"></p></footer>
+      </form>
+    </section>
+  </div>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# Windows app
+windows/dist/
+windows/data/
+windows/src/**/bin/
+windows/src/**/obj/
+windows/tools/selftest-results.json
+windows/tools/.selftest-*/
+
+# Web
+web/.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editors / local tools
+.claude/
+.vs/
+.vscode/
+*.user
