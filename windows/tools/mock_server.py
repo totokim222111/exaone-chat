@@ -3,6 +3,7 @@ import argparse
 import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit, parse_qs
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -18,6 +19,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def do_GET(self):
+        url = urlsplit(self.path)
+        if url.path == '/':
+            return self.json_response(200, {'ok': True})
+        if url.path != '/search':
+            return self.json_response(404, {'error': 'not found'})
+        query = parse_qs(url.query)
+        if query.get('format') != ['json']:
+            return self.json_response(400, {'error': 'format required'})
+        title = query.get('q', ['EXAONE'])[0]
+        rows = [{'url': f'https://example.test/source/{index}', 'title': title + f' 자료 {index}', 'content': '<b>검색 근거</b> ' + ('설명 ' * 300)} for index in range(1, 10)]
+        rows.insert(1, {'url': 'https://example.test/source/1#fragment', 'title': 'duplicate', 'content': 'duplicate'})
+        return self.json_response(200, {'results': rows})
 
     def do_POST(self):
         try:
@@ -40,6 +55,12 @@ class Handler(BaseHTTPRequestHandler):
             assert self.headers.get('Content-Type', '').startswith('application/json')
             assert body['model'] == 'mock-exaone'
             assert 'parse_reasoning' not in body
+            if not body['stream'] and body['max_tokens'] == 512:
+                assert 'EXAONE_SEARCH_QUERIES' in body['messages'][0]['content']
+                assert body.get('chat_template_kwargs') == {'enable_thinking': False}
+                question = body['messages'][-1]['content']
+                answer = 'not JSON' if question == 'fallback' else json.dumps({'queries': [question, question + ' 근거']}, ensure_ascii=False)
+                return self.json_response(200, {'choices': [{'message': {'role': 'assistant', 'content': answer}}]})
             assert body['temperature'] == 1 and body['top_p'] == .95
             if not body['stream']:
                 assert body['messages'] == [{'role': 'user', 'content': 'hi'}]
@@ -106,6 +127,16 @@ class Handler(BaseHTTPRequestHandler):
             elif mode == 'disconnect':
                 chunk(content='받은 내용')
                 return
+            elif mode == 'search':
+                context = '\n'.join(message['content'] for message in body['messages'] if message['role'] == 'system')
+                assert 'EXAONE_SEARCH_CONTEXT' in context and 'Asia/Seoul' in context
+                chunk(reasoning_content='검색 근거를 검토합니다.')
+                time.sleep(.03)
+                if '검색 실패:' in context:
+                    chunk(content='검색 없이 일반 지식으로 답변합니다.')
+                else:
+                    assert '[1]' in context and 'https://example.test/source/1' in context
+                    chunk(content='검색 근거에 따라 답변합니다. [1][2]')
             else:
                 chunk(reasoning_content='검증 중입니다.')
                 chunk(content='# 가짜 응답\n\n로컬 서버가 응답했습니다.')

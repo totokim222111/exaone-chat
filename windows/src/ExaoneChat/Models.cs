@@ -26,6 +26,11 @@ internal sealed class AppSettings
     public int MaxTokens { get; set; } = 8192;
     public bool Thinking { get; set; } = true;
     public string ReasoningEffort { get; set; } = "max";
+    public bool WebSearch { get; set; }
+    public string SearchProvider { get; set; } = "auto";
+    public string SearxngUrl { get; set; } = "http://127.0.0.1:8888";
+    public string TavilyKey { get; set; } = ""; // DPAPI ciphertext, shared with the local MCP process.
+    public string BraveKey { get; set; } = "";
     public WindowPlacement? Window { get; set; }
 }
 internal sealed record WindowPlacement(int X, int Y, int Width, int Height, bool Maximized);
@@ -40,8 +45,19 @@ internal sealed class ChatMessage
     public ChatUsage? Usage { get; set; }
     public bool Stopped { get; set; }
     public string? ReasoningEffort { get; set; }
+    public SearchMetadata? Search { get; set; }
+    public MessageTiming? Timing { get; set; }
 }
 internal sealed record ChatUsage(long? PromptTokens, long? CompletionTokens, long? ReasoningTokens);
+internal sealed record SearchSource(int N, string Title, string Url, string Domain, string Snippet);
+internal sealed class SearchMetadata
+{
+    public List<string> Queries { get; set; } = [];
+    public string? Provider { get; set; }
+    public List<SearchSource> Sources { get; set; } = [];
+    public string? Error { get; set; }
+}
+internal sealed record MessageTiming(double? FirstTokenMs, double? ReasoningMs, double? AnswerMs, double TotalMs, double? SearchMs);
 
 internal static class ChatHistory
 {
@@ -81,17 +97,19 @@ internal sealed class Conversation
     public string Model { get; set; } = "";
     public string? ReasoningEffort { get; set; }
     public bool? Thinking { get; set; }
+    public bool? WebSearch { get; set; }
     public List<ChatMessage> Messages { get; set; } = [];
 }
 
 internal static class ConversationOptions
 {
-    public static AppSettings Apply(Conversation c, AppSettings defaults, string? effort = null, bool? thinking = null)
+    public static AppSettings Apply(Conversation c, AppSettings defaults, string? effort = null, bool? thinking = null, bool? webSearch = null)
     {
         var selected = effort ?? c.ReasoningEffort ?? defaults.ReasoningEffort;
         if (selected is not ("low" or "high" or "max")) throw new InvalidOperationException("추론 강도를 확인하세요.");
         c.ReasoningEffort = selected; c.Thinking = thinking ?? c.Thinking ?? defaults.Thinking;
         defaults.ReasoningEffort = selected; defaults.Thinking = c.Thinking.Value;
+        c.WebSearch = webSearch ?? c.WebSearch ?? defaults.WebSearch; defaults.WebSearch = c.WebSearch.Value;
         var snapshot = Json.Read<AppSettings>(Json.Serialize(defaults));
         return snapshot;
     }

@@ -14,6 +14,8 @@
   <script defer src="shared/vendor/purify.min.js"></script>
   <script defer src="shared/vendor/highlight.min.js"></script>
   <script defer src="shared/vendor/katex.min.js"></script>
+  <script defer src="shared/search.js"></script>
+  <script defer src="shared/search-settings.js"></script>
   <script defer src="shared/render.js"></script>
   <script defer src="shared/chat.js"></script>
   <script defer src="shared/session.js"></script>
@@ -47,7 +49,7 @@
     <div class="composer-wrap">
       <form id="composer" class="composer">
         <textarea id="messageInput" rows="1" placeholder="메시지를 입력하세요" aria-label="메시지" maxlength="200000"></textarea>
-        <div class="composer-bottom"><div class="composer-left"><div id="reasoningChoice" class="generation-choice"><span class="generation-label">추론</span><div class="generation-options" role="group" aria-label="추론 강도"><button type="button" data-effort="low" aria-pressed="false">낮음</button><button type="button" data-effort="high" aria-pressed="false">높음</button><button type="button" data-effort="max" aria-pressed="true">최대</button></div></div><div id="thinkingChoice" class="generation-choice" hidden><span class="generation-label">생각</span><div class="generation-options" role="group" aria-label="생각 모드"><button type="button" data-thinking="false" aria-pressed="false">끔</button><button type="button" data-thinking="true" aria-pressed="true">켬</button></div></div><span id="streamStatus" class="status" aria-live="polite"></span></div><button id="sendButton" class="primary" type="submit">보내기</button></div>
+        <div class="composer-bottom"><div class="composer-left"><div id="reasoningChoice" class="generation-choice"><span class="generation-label">추론</span><div class="generation-options" role="group" aria-label="추론 강도"><button type="button" data-effort="low" aria-pressed="false">낮음</button><button type="button" data-effort="high" aria-pressed="false">높음</button><button type="button" data-effort="max" aria-pressed="true">최대</button></div></div><div id="thinkingChoice" class="generation-choice" hidden><span class="generation-label">생각</span><div class="generation-options" role="group" aria-label="생각 모드"><button type="button" data-thinking="false" aria-pressed="false">끔</button><button type="button" data-thinking="true" aria-pressed="true">켬</button></div></div><div id="searchChoice" class="generation-choice"><span class="generation-label">검색</span><div class="generation-options" role="group" aria-label="웹 검색"><button type="button" data-search="false" aria-pressed="true">끔</button><button type="button" data-search="true" aria-pressed="false">켬</button></div></div><button id="searchSettingsLink" class="search-settings-link" type="button" hidden>설정</button><span id="streamStatus" class="status" aria-live="polite"></span></div><button id="sendButton" class="primary" type="submit">보내기</button></div>
       </form>
       <p class="input-hint">Enter 보내기 · Shift+Enter 줄바꿈</p>
     </div>
@@ -64,6 +66,13 @@
             <div class="field"><label for="model">모델</label><input id="model" list="modelOptions" required spellcheck="false"><datalist id="modelOptions"><option value="k-exaone_v2.5"></option><option value="LGAI-EXAONE/K-EXAONE-2.0-750B-A37B"></option><option value="LGAI-EXAONE/K-EXAONE-236B-A23B"></option><option value="LGAI-EXAONE/EXAONE-4.0.1-32B"></option></datalist></div>
             <button id="checkConnection" class="outline" type="button">연결 확인</button>
             <div id="connectionResult" class="connection-result" role="status"></div>
+          </section>
+          <section id="searchSettings" class="settings-section"><h3>검색</h3>
+            <div class="field"><span class="field-caption">제공자</span><div class="provider-options generation-options" role="group" aria-label="검색 제공자"><button type="button" data-provider="auto" aria-pressed="true">자동</button><button type="button" data-provider="searxng" aria-pressed="false">SearXNG</button><button type="button" data-provider="tavily" aria-pressed="false">Tavily</button><button type="button" data-provider="brave" aria-pressed="false">Brave</button></div></div>
+            <div class="field"><label for="searxngUrl">SearXNG 주소</label><input id="searxngUrl" type="url" spellcheck="false" maxlength="2048"></div>
+            <div class="field"><div class="field-label"><label for="tavilyKey">Tavily 키</label><button id="deletetavilyKey" type="button">키 삭제</button></div><input id="tavilyKey" type="password" autocomplete="off" spellcheck="false" maxlength="8192"><p class="field-note"><a href="https://tavily.com" target="_blank" rel="noopener noreferrer">Tavily에서 키 발급</a></p></div>
+            <div class="field"><div class="field-label"><label for="braveKey">Brave 키</label><button id="deletebraveKey" type="button">키 삭제</button></div><input id="braveKey" type="password" autocomplete="off" spellcheck="false" maxlength="8192"><p class="field-note"><a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">Brave에서 키 발급</a></p></div>
+            <button id="checkSearch" class="outline" type="button">검색 확인</button><div id="searchResult" class="connection-result" role="status"></div>
           </section>
           <section class="settings-section"><h3>응답</h3>
             <div class="field"><label for="temperature">Temperature</label><div class="range-row"><input id="temperatureRange" aria-label="Temperature 슬라이더" type="range" min="0" max="2" step="0.05"><input id="temperature" type="number" min="0" max="2" step="0.05" required></div></div>

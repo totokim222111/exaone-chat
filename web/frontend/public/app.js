@@ -2,6 +2,7 @@
 (() => {
   const $ = id => document.getElementById(id);
   const state = { settings: { hasKey: false }, config: null, ready: false, conversations: [], current: null, view: 0, deletingKey: false, composing: false, lastFocus: null };
+  let workspace = null;
   const isOfficial = baseUrl => { try { return (state.config?.exaoneStyleHosts || ['api.exaone.ai']).some(host => host.toLowerCase() === new URL(baseUrl).hostname.toLowerCase()); } catch { return false; } };
   const coarse = window.matchMedia('(pointer: coarse)');
   const time = date => new Date(date).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -30,7 +31,7 @@
   }
 
   let sessionPending = null;
-  function applyMe(me) { state.settings = { ...me.settings, hasKey: me.hasKey, keySuffix: me.keyLast4 || '' }; }
+  function applyMe(me) { state.settings = { ...me.settings, hasKey: me.hasKey, keySuffix: me.keyLast4 || '' }; state.searchKeys = me.searchKeys || {}; }
   async function session() {
     if (!sessionPending) sessionPending = http('/api/session', 'POST', {}, { recover: false })
       .then(response => response.json()).then(me => { applyMe(me); return me; })
@@ -42,8 +43,8 @@
     const mutation = method !== 'GET';
     const response = await fetch(path, {
       method, credentials: 'same-origin', signal,
-      headers: mutation ? { 'X-Exa': '1', 'Content-Type': 'application/json' } : {},
-      body: mutation ? JSON.stringify(body ?? {}) : undefined
+      headers: mutation ? { 'X-Exa': '1', ...(body instanceof FormData ? {} : { 'Content-Type': 'application/json' }) } : {},
+      body: mutation ? body instanceof FormData ? body : JSON.stringify(body ?? {}) : undefined
     });
     if (response.ok) return response;
     const data = await response.json().catch(() => ({}));
@@ -60,11 +61,16 @@
     const response = await http(path, method, body);
     return response.status === 204 ? null : response.json();
   }
+  async function saveSearchKeys(values) {
+    const keys = {}; for (const name of ['tavilyKey', 'braveKey']) if (values[name] !== undefined) keys[name] = values[name];
+    if (Object.keys(keys).length) state.searchKeys = await api('/api/search-keys', 'PUT', keys);
+  }
   async function saveSettingsValues(payload, verify = false) {
-    const { newApiKey, deleteKey, ...settings } = payload;
+    const { newApiKey, deleteKey, tavilyKey, braveKey, ...settings } = payload;
     // The REST API saves connection settings separately from the encrypted key.
     const saved = await api('/api/settings', 'PUT', settings);
     state.settings = { ...state.settings, ...saved };
+    await saveSearchKeys({ tavilyKey, braveKey });
     updateSettingsSummary();
     if (newApiKey) {
       const key = await api('/api/key', 'PUT', { apiKey: newApiKey, verify });
@@ -129,9 +135,16 @@
     }
   }
 
+  function searchAvailable() {
+    const provider = state.settings.searchProvider || 'auto', keys = state.searchKeys;
+    const server = state.config?.search?.serverProvider === 'searxng';
+    return provider === 'auto' ? !!(server || keys?.tavily?.hasKey || keys?.brave?.hasKey) : provider === 'searxng' ? server : !!keys?.[provider]?.hasKey;
+  }
   const sessions = ExaSession.create({
     current: () => state.current, settings: () => state.settings, official: isOfficial, limit: 4,
     ready: () => state.ready,
+    blocked: () => workspace?.blocked(), hasDraftContent: () => workspace?.hasContent(),
+    searchAvailable, openSettings,
     persist: async (values, id) => { await api('/api/settings', 'PUT', values); },
     changed: () => { updateSettingsSummary(); renderList(); renderAppError(); }
   });
@@ -146,6 +159,7 @@
   function refreshGenerationUI() { updateSettingsSummary(); renderAppError(); renderList(); chat.render(); }
   function attachRun(run, conversation) {
     const oldId = run.id, selected = sessions.choices.get(oldId) || run.selection;
+    workspace?.migrate(oldId, conversation.id);
     sessions.runs.delete(oldId); sessions.choices.delete(oldId);
     run.id = conversation.id; run.conversation = conversation; sessions.runs.set(run.id, run);
     sessions.remember(conversation, selected); upsertConversation(conversation);
@@ -155,12 +169,29 @@
   function saveDraft() { sessions.drafts.set(state.current?.id || 'new', $('messageInput').value); }
   function restoreDraft() { $('messageInput').value = sessions.drafts.get(state.current?.id || 'new') || ''; autoSize(); }
   const chat = ExaChat.create({
-    current: () => state.current, busy: () => sessions.busy(), stream: () => sessions.runs.get(state.current?.id)?.started ? sessions.runs.get(state.current.id).conversation : null,
+    current: () => state.current, run: () => sessions.runs.get(state.current?.id), busy: () => sessions.busy(), stream: () => sessions.runs.get(state.current?.id)?.started ? sessions.runs.get(state.current.id).conversation : null,
     copy: copyText, saveFile: ExaRender.download,
-    edit: (message, index, content) => sendMessage(false, { messageId: message.id, index, content }),
+    edit: (message, index, content, attachments) => sendMessage(false, { messageId: message.id, index, content, attachments }),
+    renderAttachments: (container, message) => workspace?.renderAttachments(container, message),
+    editorAttachments: (form, message, changed) => workspace?.editorAttachments(form, message, changed),
     retry: () => sendMessage(true), settings: openSettings, errorText: errorMessage,
     needsKey: needsKey, showError,
     maxMessageChars: () => state.config?.limits.maxMessageChars || 32000
+  });
+  const searchSettings = ExaSearchSettings.create({
+    settings: () => state.settings, keys: () => state.searchKeys,
+    serverAvailable: () => state.config?.search?.serverProvider === 'searxng',
+    check: async () => { const payload = searchSettings.payload(); await api('/api/settings', 'PUT', { searchProvider: payload.searchProvider }); state.settings.searchProvider = payload.searchProvider; await saveSearchKeys(payload); return api('/api/search/test', 'POST', { provider: payload.searchProvider }); }, changed: updateSettingsSummary
+  });
+  workspace = WebWorkspace.create({
+    api, http, sessions, chat, current: () => state.current, conversations: () => state.conversations,
+    setConversations: value => { state.conversations = value; }, changed: refreshGenerationUI,
+    open: openConversation, newConversation: () => newConversation({ keepSidebar: true }), rename: renameConversation,
+    remove: async id => {
+      await stopGeneration(id); state.conversations = await request('conversations.delete', { id });
+      sessions.choices.delete(id); sessions.unread.delete(id); sessions.errors.delete(id);
+      if (state.current?.id === id) newConversation(); else refreshGenerationUI();
+    }
   });
   function updateSettingsSummary() {
     const s = state.settings;
@@ -185,48 +216,7 @@
     state.conversations = await request('conversations.list');
     renderList();
   }
-  function renderList() {
-    const list = $('conversationList'); list.replaceChildren();
-    const query = $('conversationSearch').value.trim().toLocaleLowerCase();
-    const filtered = state.conversations.filter(c => c.title.toLocaleLowerCase().includes(query));
-    if (query && !filtered.length) {
-      const empty = make('div', 'search-empty', '검색 결과 없음'); const clear = make('button', '', '지우기');
-      clear.addEventListener('click', () => { $('conversationSearch').value = ''; renderList(); $('conversationSearch').focus(); });
-      empty.append(clear); list.append(empty);
-    }
-    for (const c of filtered) {
-      const row = make('div', 'conversation-row' + (c.id === state.current?.id ? ' current' : '') + (sessions.unread.has(c.id) ? ' unread' : ''));
-      const open = make('button', 'conversation-open', c.title);
-      open.title = c.title;
-      if (c.id === state.current?.id) open.setAttribute('aria-current', 'page');
-      open.addEventListener('click', () => openConversation(c.id));
-      open.addEventListener('dblclick', () => renameConversation(c, row));
-      // Keyboard equivalent of the title's double click.
-      open.addEventListener('keydown', event => { if (event.key === 'F2') { event.preventDefault(); renameConversation(c, row); } });
-      const del = make('button', 'conversation-delete', '삭제');
-      del.setAttribute('aria-label', `${c.title} 삭제`);
-      del.disabled = false;
-      let confirming = false;
-      let reset;
-      del.addEventListener('click', async () => {
-        if (!confirming) {
-          confirming = true; del.textContent = '확인'; del.classList.add('confirming');
-          del.setAttribute('aria-label', `${c.title} 삭제 확인`);
-          reset = setTimeout(() => { confirming = false; del.textContent = '삭제'; del.classList.remove('confirming'); del.setAttribute('aria-label', `${c.title} 삭제`); }, 3000);
-          return;
-        }
-        clearTimeout(reset); del.disabled = true;
-        try {
-          await stopGeneration(c.id);
-          state.conversations = await request('conversations.delete', { id: c.id });
-          sessions.choices.delete(c.id); sessions.unread.delete(c.id); sessions.errors.delete(c.id);
-          if (state.current?.id === c.id) newConversation();
-          else renderList();
-        } catch (error) { showError(error); del.disabled = false; }
-      });
-      row.append(open); if (sessions.runs.has(c.id)) row.append(make('i', 'conversation-progress')); row.append(del); list.append(row);
-    }
-  }
+  function renderList() { workspace?.renderList(); }
   function renameConversation(c, row) {
     if (sessions.busy(c.id) || row.querySelector('input')) return;
     const input = make('input', 'rename-input'); input.value = c.title;
@@ -259,10 +249,10 @@
       renderConversation(); renderList(); renderAppError(); closeSidebar();
     } catch (error) { if (view === state.view) showError(error); }
   }
-  function newConversation() {
+  function newConversation(options = {}) {
     saveDraft(); ++state.view; state.current = null; chat.endEdit(); sessions.drafts.delete('new');
     $('messageInput').value = ''; autoSize();
-    renderConversation(); renderList(); renderAppError(); closeSidebar();
+    renderConversation(); renderList(); renderAppError(); if (!options.keepSidebar) closeSidebar();
     if (state.settings.hasKey) $('messageInput').focus();
   }
   function closeSidebar() {
@@ -301,16 +291,20 @@
   async function sendMessage(retry = false, edit = null) {
     if (sessions.busy()) return stopGeneration();
     if (!state.ready) return;
+    const draftKey = state.current?.id || 'new';
+    const attached = retry ? [] : edit ? edit.attachments || [] : workspace.items();
+    if (!retry && !edit && workspace.blocked()) return;
     const content = edit ? edit.content : $('messageInput').value.trim();
-    if (!retry && !content) return;
+    if (!retry && !content && !attached.length) return;
     if (!state.settings.hasKey) { openSettings(); return; }
     const run = sessions.reserve(state.current); if (!run) return;
+    workspace.migrate(draftKey, run.id); run.attachmentIds = attached.map(item => item.id);
     state.current = run.conversation;
     run.controller = new AbortController();
     run.previousAssistantId = run.conversation.messages.at(-1)?.role === 'assistant' ? run.conversation.messages.at(-1).id : null;
     const originalInput = $('messageInput').value;
-    sessions.errors.delete(run.id); chat.endEdit();
-    if (!edit) { $('messageInput').value = ''; sessions.drafts.delete(run.id); }
+    sessions.errors.delete(run.id);
+    if (!edit && !retry) { $('messageInput').value = ''; sessions.drafts.delete(run.id); }
     autoSize(); refreshGenerationUI();
     let accepted = false, terminal = false;
     try {
@@ -321,19 +315,21 @@
       run.controller.signal.throwIfAborted();
       const path = '/api/conversations/' + encodeURIComponent(run.id) + (edit ? '/messages/' + encodeURIComponent(edit.messageId) + '/edit' : retry ? '/retry' : '/messages');
       run.sent = true;
-      const response = await http(path, 'POST', { ...run.selection, ...(!retry ? { content } : {}) }, { signal: run.controller.signal });
-      accepted = true; run.started = true;
+      const response = await http(path, 'POST', { ...run.selection, ...(!retry ? { content } : {}), ...(!retry && (run.attachmentIds.length || (edit && run.conversation.messages[edit.index].attachments?.length)) ? { attachmentIds: run.attachmentIds } : {}) }, { signal: run.controller.signal });
+      accepted = true; run.started = true; workspace.accepted(run.id, run.attachmentIds, edit?.messageId); chat.endEdit();
       const c = run.conversation;
       c.model = state.settings.model;
       if (edit) { c.messages.splice(edit.index + 1); c.messages[edit.index].content = content; }
       else if (retry) c.messages.pop();
-      else c.messages.push({ role: 'user', content, createdAt: new Date().toISOString() });
+      else c.messages.push({ role: 'user', content, attachments: attached, createdAt: new Date().toISOString() });
       c.messages.push({ id: 'pending:' + run.id + ':' + Date.now(), role: 'assistant', content: '', reasoning: '', createdAt: new Date().toISOString(), reasoningEffort: isOfficial(state.settings.baseUrl) ? run.selection.reasoningEffort : null });
+      if (run.selection.webSearch) c.messages.at(-1).search = { queries: [], provider: null, sources: [], stage: 'pending' };
       if (state.current?.id === run.id) { state.current = c; chat.follow(); renderConversation(); }
       await readSSE(response, (name, data) => {
         const messages = c.messages, index = messages.length - 1;
-        if (name === 'user') { messages[index - 1] = data.message; if (messages.length === 2) c.title = Array.from(data.message.content).slice(0, 30).join(''); }
-        else if (name === 'content' || name === 'reasoning') messages[index][name] = (messages[index][name] || '') + data.delta;
+        if (name === 'user') { messages[index - 1] = data.message; if (messages.length === 2) c.title = Array.from(data.message.content || data.message.attachments?.[0]?.name || '새 대화').slice(0, 30).join(''); }
+        else if (name === 'search') { ExaSearch.apply(messages[index], data); if (data.stage === 'results' || data.stage === 'error') run.phases.searchDone = Date.now(); }
+        else if (name === 'content' || name === 'reasoning') { run.phases[name === 'content' ? 'answer' : 'reasoning'] ||= Date.now(); messages[index][name] = (messages[index][name] || '') + data.delta; }
         else if (name === 'done') { chat.rekeyMessage(run.id, messages[index].id, data.message.id); messages[index] = data.message; Object.assign(c, data.conversation); terminal = true; }
         else if (name === 'error') { chat.rekeyMessage(run.id, messages[index].id, data.assistantMessage.id); messages[index] = data.assistantMessage; run.error = data; terminal = true; }
         sessions.adopt(c); upsertConversation(c);
@@ -373,7 +369,7 @@
   function openSettings() {
     if (!state.ready || !$('settingsOverlay').hidden) return;
     state.lastFocus = document.activeElement; state.deletingKey = false;
-    const s = state.settings;
+    const s = state.settings; searchSettings.refresh();
     for (const id of ['baseUrl', 'model', 'systemPrompt', 'temperature', 'topP', 'maxTokens']) $(id).value = s[id];
     $('temperatureRange').value = s.temperature; $('topPRange').value = s.topP;
     $('apiKey').value = ''; $('apiKey').placeholder = s.hasKey ? `저장됨 ••••${s.keySuffix}` : 'API 키 입력';
@@ -383,13 +379,14 @@
     $('settingsOverlay').hidden = false; closeSidebar(); updateModalState(); $('settingsPanel').focus();
   }
   function closeSettings() {
+    searchSettings.clearSecrets();
     cancelHold(); $('apiKey').value = ''; $('settingsOverlay').hidden = true; updateModalState();
     state.lastFocus?.focus();
   }
   function settingsPayload() {
     return { baseUrl: $('baseUrl').value.trim(), model: $('model').value.trim(), systemPrompt: $('systemPrompt').value,
       temperature: Number($('temperature').value), topP: Number($('topP').value), maxTokens: Number($('maxTokens').value),
-      newApiKey: $('apiKey').value.trim(), deleteKey: state.deletingKey };
+      ...searchSettings.payload(), newApiKey: $('apiKey').value.trim(), deleteKey: state.deletingKey };
   }
   async function saveSettings(event) {
     event.preventDefault(); if (state.settingsBusy) return; state.settingsBusy = true; updateSettingsSummary();
@@ -398,6 +395,7 @@
       $('apiKey').value = ''; $('apiKey').placeholder = state.settings.hasKey ? `저장됨 ••••${state.settings.keySuffix}` : 'API 키 입력';
       state.deletingKey = false; $('deleteKey').textContent = '키 삭제'; $('deleteKey').disabled = !state.settings.hasKey;
       $('keyNote').textContent = state.settings.hasKey ? '빈칸으로 저장하면 기존 키를 유지합니다.' : '이 서버에 암호화해 저장합니다.';
+      searchSettings.refresh();
       $('saveResult').textContent = `저장됨 · ${time(new Date())}`; updateSettingsSummary();
     } catch (error) { $('saveResult').textContent = errorMessage(error); }
     finally { state.settingsBusy = false; updateSettingsSummary(); }
@@ -412,7 +410,6 @@
     } catch (error) { $('connectionResult').replaceChildren(make('span', 'tag', '실패'), make('span', '', errorMessage(error))); }
     finally { state.settingsBusy = false; updateSettingsSummary(); }
   }
-  $('conversationSearch').addEventListener('input', renderList);
   $('newChat').addEventListener('click', newConversation);
   $('toggleList').addEventListener('click', () => {
     const open = $('sidebar').classList.toggle('visible'); $('sidebarShade').hidden = !open; $('toggleList').setAttribute('aria-expanded', String(open)); updateModalState();
@@ -495,7 +492,7 @@
       await sessions.flush();
       await api('/api/session', 'DELETE');
       await sessions.flush();
-      await session(); sessions.clear(); state.conversations = []; state.current = null;
+      await session(); sessions.clear(); state.conversations = []; state.current = null; workspace.clear();
       $('startKey').value = ''; $('startError').hidden = true; $('streamStatus').replaceChildren();
       state.deletingKey = false; closeSettings(); newConversation(); $('startKey').focus();
     } catch (error) { $('saveResult').textContent = errorMessage(error); }

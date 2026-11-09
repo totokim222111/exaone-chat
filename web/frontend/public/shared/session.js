@@ -8,7 +8,8 @@
     function selection(conversation = options.current()) {
       const saved = choices.get(conversation?.id) || conversation || {}, defaults = options.settings();
       return { reasoningEffort: validEffort(saved.reasoningEffort) ? saved.reasoningEffort : validEffort(defaults.reasoningEffort) ? defaults.reasoningEffort : 'max',
-        thinking: typeof saved.thinking === 'boolean' ? saved.thinking : defaults.thinking ?? true };
+        thinking: typeof saved.thinking === 'boolean' ? saved.thinking : defaults.thinking ?? true,
+        webSearch: typeof saved.webSearch === 'boolean' ? saved.webSearch : defaults.webSearch ?? false };
     }
     function adopt(conversation) {
       if (conversation && choices.has(conversation.id)) Object.assign(conversation, choices.get(conversation.id));
@@ -27,8 +28,11 @@
       $('reasoningChoice').hidden = !official; $('thinkingChoice').hidden = official;
       for (const button of document.querySelectorAll('[data-effort]')) button.setAttribute('aria-pressed', String(button.dataset.effort === selected.reasoningEffort));
       for (const button of document.querySelectorAll('[data-thinking]')) button.setAttribute('aria-pressed', String((button.dataset.thinking === 'true') === selected.thinking));
+      const available = options.searchAvailable?.() ?? false;
+      for (const button of document.querySelectorAll('[data-search]')) { button.disabled = !available; button.setAttribute('aria-pressed', String((button.dataset.search === 'true') === selected.webSearch)); }
+      $('searchSettingsLink').hidden = available;
       $('sendButton').textContent = run ? '중지' : '보내기'; $('sendButton').className = run ? 'outline' : 'primary';
-      $('sendButton').disabled = options.ready?.() === false || !!run?.stopping || (!run && !$('messageInput').value.trim());
+      $('sendButton').disabled = options.ready?.() === false || !!run?.stopping || (!run && (options.blocked?.() || !($('messageInput').value.trim() || options.hasDraftContent?.())));
       $('messageInput').readOnly = !!run;
       $('streamStatus').replaceChildren();
       if (run) {
@@ -40,7 +44,10 @@
     }
     for (const button of document.querySelectorAll('[data-effort]')) button.addEventListener('click', () => choose({ reasoningEffort: button.dataset.effort }));
     for (const button of document.querySelectorAll('[data-thinking]')) button.addEventListener('click', () => choose({ thinking: button.dataset.thinking === 'true' }));
+    for (const button of document.querySelectorAll('[data-search]')) button.addEventListener('click', () => choose({ webSearch: button.dataset.search === 'true' }));
+    $('searchSettingsLink').addEventListener('click', () => { options.openSettings(); requestAnimationFrame(() => { $('searchSettings').scrollIntoView({ block: 'start' }); $('searchSettings').querySelector('button').focus(); }); });
     $('messageInput').addEventListener('keydown', event => {
+      if (event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && event.key.toLowerCase() === 's' && (options.searchAvailable?.() ?? false)) { event.preventDefault(); choose({ webSearch: !selection().webSearch }); }
       if (event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && options.official(options.settings().baseUrl) && ['1', '2', '3'].includes(event.key)) {
         event.preventDefault(); choose({ reasoningEffort: ['low', 'high', 'max'][Number(event.key) - 1] });
       }
@@ -51,7 +58,7 @@
         const values = selection(conversation);
         const c = conversation || { id: 'draft:' + Array.from(crypto.getRandomValues(new Uint32Array(2))).join('-'), local: true, title: '새 대화', model: options.settings().model, messages: [], ...values };
         let resolve;
-        const run = { id: c.id, conversation: c, selection: { ...values }, started: false, sent: false, stopping: false,
+        const run = { id: c.id, conversation: c, selection: { ...values }, startedAt: Date.now(), phases: {}, started: false, sent: false, stopping: false,
           finished: new Promise(done => { resolve = done; }), resolve: () => resolve() };
         runs.set(c.id, run); Object.assign(options.settings(), values); return run;
       },

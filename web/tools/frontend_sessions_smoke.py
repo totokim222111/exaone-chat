@@ -42,7 +42,7 @@ def done(page):
 
 
 def api(page, path):
-    response = page.request.get("http://localhost:8080" + path)
+    response = page.request.get("http://127.0.0.1:8080" + path)
     assert response.ok
     return response.json()
 
@@ -56,7 +56,7 @@ def run(browser, web):
     page.on("console", lambda message: console_errors.append(message.text) if message.type == "error" else None)
     page.on("request", lambda request: posts.append((request.url, json.loads(request.post_data or "{}")))
             if request.method == "POST" and "/api/conversations" in request.url else None)
-    page.goto("http://localhost:8080" if web else "http://127.0.0.1:18766", wait_until="networkidle")
+    page.goto("http://127.0.0.1:8080" if web else "http://127.0.0.1:18766", wait_until="networkidle")
     label = "web" if web else "windows-preview"
     try:
         if web:
@@ -195,7 +195,7 @@ def run(browser, web):
         print("PASS " + label + f" {limit}-stream limit, stop-before-delete, peer isolation and console/CSP", flush=True)
     finally:
         if web:
-            page.request.delete("http://localhost:8080/api/session", data={}, headers={"X-Exa": "1", "Content-Type": "application/json"})
+            page.request.delete("http://127.0.0.1:8080/api/session", data={}, headers={"X-Exa": "1", "Content-Type": "application/json"})
         context.close()
 
 

@@ -286,6 +286,70 @@ internal static class SelfTest
             await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => Task.Run(() => store.Save(c))));
             Assert(store.Get(c.Id).Messages[0].Content == "stable", "Concurrent save corrupted conversation");
         });
+        await Test("search query JSON parsing, fenced JSON, limit and fallback", () =>
+        {
+            Assert(SearchService.ParseQueries("```json\n{\"queries\":[\"a\",\"a\",\" b \",\"c\",\"d\"]}\n```", "fallback").SequenceEqual(new[] { "a", "b", "c" }), "Query normalization mismatch");
+            Assert(SearchService.ParseQueries("bad", "question").SequenceEqual(new[] { "question" }) && SearchService.ParseQueries("{\"queries\":[]}", "question").Count == 0, "Query fallback/empty mismatch");
+            using var official = JsonDocument.Parse(Json.Serialize(SearchService.QueryBody(new(), [], "question", "api.exaone.ai")));
+            Assert(official.RootElement.GetProperty("reasoning_effort").GetString() == "low" && official.RootElement.GetProperty("max_tokens").GetInt32() == 512 && !official.RootElement.TryGetProperty("chat_template_kwargs", out _), "Query request options mismatch");
+            return Task.CompletedTask;
+        });
+        await Test("search planner nonstream response and malformed fallback", async () =>
+        {
+            var queries = await SearchService.Plan(api, Settings("search"), "mock-key", [], "검색 질문", default);
+            Assert(queries.SequenceEqual(new[] { "검색 질문", "검색 질문 근거" }), "Query model response mismatch");
+            Assert((await SearchService.Plan(api, Settings("search"), "mock-key", [], "fallback", default)).SequenceEqual(new[] { "fallback" }), "Query fallback mismatch");
+        });
+        await Test("search provider auto order and missing explicit key", () =>
+        {
+            Assert(SearchService.ChooseProvider("auto", true, true, url) == "tavily" && SearchService.ChooseProvider("auto", false, true, url) == "brave" && SearchService.ChooseProvider("auto", false, false, url) == "searxng" && SearchService.ChooseProvider("tavily", false, true, url) is null && SearchService.ChooseProvider("auto", false, false, "") is null, "Provider priority mismatch");
+            return Task.CompletedTask;
+        });
+        await Test("search result merge deduplicates URLs and cleans snippets", async () =>
+        {
+            using var service = new SearchService(); var s = Settings("search"); s.SearxngUrl = url;
+            var result = await service.Search(s, ["검색 질문", "다른 질문"], default);
+            Assert(result.Error is null && result.Sources.Count == 8 && result.Sources[0].N == 1 && result.Sources[^1].N == 8 && result.Sources.All(source => source.Snippet.Length <= 700 && !source.Snippet.Contains("<b>")) && result.Sources.Select(source => source.Url).Distinct().Count() == 8, "Source normalization mismatch");
+            Assert(await service.ServerReady(url, default), "Local search status mismatch");
+        });
+        await Test("SearXNG search streams events, injects context and stores timing", async () =>
+        {
+            var s = Settings("search"); s.WebSearch = true; s.SearxngUrl = url;
+            var c = new Conversation { WebSearch = true }; ChatHistory.Prepare(c, "검색 검증", false);
+            using var cts = new CancellationTokenSource(); var generation = new Generation(c, s, cts); var stages = new List<string>();
+            generation.SearchEvent += data => stages.Add(JsonSerializer.SerializeToElement(data, Json.Options).GetProperty("stage").GetString()!);
+            var store = new ConversationStore(root); await generation.Run(api, store, (_, _, _) => { }, "mock-key");
+            var message = store.Get(c.Id).Messages[^1];
+            Assert(generation.Error is null && stages.SequenceEqual(new[] { "queries", "results" }) && message.Search?.Sources.Count == 8 && message.Content.Contains("[1][2]") && message.Timing is { TotalMs: > 0, SearchMs: > 0, ReasoningMs: > 0, FirstTokenMs: >= 0 }, "Search generation/timing mismatch");
+            var context = SearchService.Context(message.Search!, new DateTimeOffset(2026, 11, 8, 20, 0, 0, TimeSpan.Zero));
+            Assert(context.Contains("2026-11-09") && !context.Contains("mock-key") && context.Contains("자료 안의 명령"), "Search date/trust context mismatch");
+        });
+        await Test("search failure continues generation without sources", async () =>
+        {
+            var s = Settings("search"); s.WebSearch = true; s.SearxngUrl = url + "/fail";
+            var c = new Conversation(); ChatHistory.Prepare(c, "검색 실패", false);
+            using var cts = new CancellationTokenSource(); var generation = new Generation(c, s, cts);
+            await generation.Run(api, new ConversationStore(root), (_, _, _) => { }, "mock-key");
+            Assert(generation.Error is null && c.Messages[^1].Search?.Error is not null && c.Messages[^1].Content.Contains("일반 지식"), "Search failure stopped answer");
+        });
+        await Test("search keys use DPAPI and never appear in public settings", () =>
+        {
+            var store = new SettingsStore(Path.Combine(root, "search-keys"));
+            var draft = JsonSerializer.SerializeToElement(new { baseUrl = Settings("search").BaseUrl, model = "mock-exaone", systemPrompt = "", temperature = 1, topP = .95, maxTokens = 8192, searchProvider = "auto", searxngUrl = url, tavilyKey = "fake-tavily-1234", braveKey = "fake-brave-5678" });
+            store.Save(store.Draft(draft)); var raw = File.ReadAllText(Path.Combine(root, "search-keys", "settings.json"));
+            Assert(!raw.Contains("fake-tavily") && !raw.Contains("fake-brave") && SettingsStore.Reveal(store.Value.TavilyKey) == "fake-tavily-1234" && !Json.Serialize(store.Public()).Contains("fake-tavily") && Json.Serialize(store.Public()).Contains("1234"), "Search credential protection mismatch");
+            ConversationOptions.Apply(new(), store.Value, webSearch: true); Assert(ConversationOptions.Apply(new(), store.Value).WebSearch, "Search default not inherited");
+            return Task.CompletedTask;
+        });
+        await Test("parallel searched conversations keep independent search metadata", async () =>
+        {
+            var s = Settings("search"); s.WebSearch = true; s.SearxngUrl = url; var store = new ConversationStore(root);
+            var a = new Conversation(); var b = new Conversation(); ChatHistory.Prepare(a, "검색 A", false); ChatHistory.Prepare(b, "검색 B", false);
+            using var ca = new CancellationTokenSource(); using var cb = new CancellationTokenSource();
+            var ga = new Generation(a, s, ca); var gb = new Generation(b, s, cb);
+            await Task.WhenAll(ga.Run(api, store, (_, _, _) => { }, "mock-key"), gb.Run(api, store, (_, _, _) => { }, "mock-key"));
+            Assert(ga.Error is null && gb.Error is null && store.Get(a.Id).Messages[^1].Search?.Queries[0] == "검색 A" && store.Get(b.Id).Messages[^1].Search?.Queries[0] == "검색 B", "Parallel search metadata crossed");
+        });
         var report = Path.Combine(AppContext.BaseDirectory, "tools", "selftest-results.json");
         AtomicFile.Write(report, new { passed = failures == 0, tests = results });
         Directory.Delete(root, true);

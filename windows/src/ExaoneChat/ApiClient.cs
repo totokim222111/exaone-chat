@@ -15,11 +15,12 @@ internal sealed class ApiClient : IDisposable
     internal const string AuthGuidance = "API 키나 주소를 확인하세요. EXAONE API 키는 https://api.exaone.ai/v1 에서 씁니다.";
     private readonly HttpClient http = new(new HttpClientHandler { AllowAutoRedirect = false }) { Timeout = Timeout.InfiniteTimeSpan };
     // Pure request builder: host is explicit so provider behavior can be tested offline.
-    internal static Dictionary<string, object> Body(AppSettings s, IEnumerable<ChatMessage> messages, bool stream, string host)
+    internal static Dictionary<string, object> Body(AppSettings s, IEnumerable<ChatMessage> messages, bool stream, string host, string? searchContext = null)
     {
         var official = host.Equals("api.exaone.ai", StringComparison.OrdinalIgnoreCase);
         var history = new List<object>();
         if (stream && !string.IsNullOrWhiteSpace(s.SystemPrompt)) history.Add(new { role = "system", content = s.SystemPrompt });
+        if (stream && searchContext is not null) history.Add(new { role = "system", content = searchContext });
         history.AddRange(messages.Where(m => m.Role is "user" or "assistant" && !string.IsNullOrEmpty(m.Content))
             .Select(m => (object)new { role = m.Role, content = m.Content }));
         var body = new Dictionary<string, object> { ["model"] = s.Model, ["messages"] = history,
@@ -50,13 +51,13 @@ internal sealed class ApiClient : IDisposable
         catch (JsonException) { }
         return body[..Math.Min(body.Length, 300)];
     }
-    private async Task<HttpResponseMessage> Request(AppSettings s, string key, IEnumerable<ChatMessage> messages, bool stream, CancellationToken ct)
+    private async Task<HttpResponseMessage> Request(AppSettings s, string key, IEnumerable<ChatMessage> messages, bool stream, CancellationToken ct, Dictionary<string, object>? customBody = null, string? searchContext = null)
     {
         SettingsStore.Validate(s);
         if (string.IsNullOrWhiteSpace(key)) throw new ApiException(AuthGuidance, 401);
         using var req = new HttpRequestMessage(HttpMethod.Post, s.BaseUrl.TrimEnd('/') + "/chat/completions");
         req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
-        req.Content = new StringContent(Json.Serialize(Body(s, messages, stream, new Uri(s.BaseUrl).Host)), Encoding.UTF8, "application/json");
+        req.Content = new StringContent(Json.Serialize(customBody ?? Body(s, messages, stream, new Uri(s.BaseUrl).Host, searchContext)), Encoding.UTF8, "application/json");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(120));
         HttpResponseMessage response;
@@ -85,7 +86,13 @@ internal sealed class ApiClient : IDisposable
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new ApiException("연결 확인 시간이 초과되었습니다."); }
     }
-    public async Task Stream(AppSettings s, string key, IEnumerable<ChatMessage> messages, Action<string, string> emit, CancellationToken ct, Action<ChatUsage>? usage = null)
+    internal async Task<string> Complete(AppSettings s, string key, Dictionary<string, object> body, CancellationToken ct)
+    {
+        using var res = await Request(s, key, [], false, ct, body);
+        using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync(ct));
+        return doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString() ?? "";
+    }
+    public async Task Stream(AppSettings s, string key, IEnumerable<ChatMessage> messages, Action<string, string> emit, CancellationToken ct, Action<ChatUsage>? usage = null, string? searchContext = null)
     {
         var contentStarted = false;
         void Emit(string kind, string value)
@@ -102,7 +109,7 @@ internal sealed class ApiClient : IDisposable
         ChatUsage? latestUsage = null;
         try
         {
-            using var res = await Request(s, key, messages, true, ct);
+            using var res = await Request(s, key, messages, true, ct, searchContext: searchContext);
             using var stream = await res.Content.ReadAsStreamAsync(ct);
             using var reader = new StreamReader(stream, Encoding.UTF8);
             var data = new StringBuilder();

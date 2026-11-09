@@ -136,7 +136,9 @@
   function render(container, text = '', options = {}) {
     let state = states.get(container);
     if (!state) { state = { cards: new Map() }; states.set(container, state); }
-    if (state.text === text && state.streaming === !!options.streaming && state.noTools === !!options.noTools) return;
+    const citationKey = JSON.stringify(options.sources || []);
+    if (state.text === text && state.streaming === !!options.streaming && state.noTools === !!options.noTools && state.citationKey === citationKey) return;
+    state.citationKey = citationKey;
     state.text = text; state.streaming = !!options.streaming; state.noTools = !!options.noTools;
     const nonce = 'EXAPLACE' + Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16)).join('') + 'X', items = [];
     const token = item => { items.push(item); return nonce + (items.length - 1) + 'END'; };
@@ -180,6 +182,7 @@
       const wrap = el('div', 'table-scroll'); table.replaceWith(wrap); wrap.append(table);
     }
     for (const link of fragment.querySelectorAll('a')) { link.target = '_blank'; link.rel = 'noopener noreferrer'; }
+    if (!options.noTools) ExaSearch.citations(fragment, options.sources);
     for (const index of state.cards.keys()) if (index >= ordinal) state.cards.delete(index);
     container.replaceChildren(fragment);
   }
@@ -189,7 +192,7 @@
   }
   function exportConversation(conversation) {
     return '# ' + conversation.title.replace(/[\r\n]/g, ' ') + '\n\n' + conversation.messages.map(message =>
-      '## ' + (message.role === 'user' ? '나' : 'EXAONE') + '\n\n' + message.content).join('\n\n') + '\n';
+      '## ' + (message.role === 'user' ? '나' : 'EXAONE') + '\n\n' + ExaSearch.copyText(message)).join('\n\n') + '\n';
   }
   window.ExaRender = Object.freeze({ render, download, usageText, exportConversation });
 })();

@@ -135,9 +135,19 @@ internal sealed class MainForm : Form
                         Reply(reqId, new { saved = true, cancelled = false });
                     }
                     break;
-                case "settings.get": Reply(reqId, settings.Public()); break;
+                case "settings.get": Reply(reqId, await PublicSettings()); break;
+                case "search.test":
+                    var searchSettings = settings.Draft(p);
+                    var startedSearch = System.Diagnostics.Stopwatch.StartNew();
+                    using (var service = new SearchService())
+                    {
+                        var found = await service.Search(searchSettings, ["EXAONE"], lifetime.Token);
+                        Reply(reqId, new { ok = found.Sources.Count > 0, provider = found.Provider, resultCount = found.Sources.Count,
+                            latencyMs = Math.Round(startedSearch.Elapsed.TotalMilliseconds), message = found.Error ?? "웹 검색을 확인했습니다." });
+                    }
+                    break;
                 case "settings.save":
-                    var next = settings.Draft(p); settings.Save(next); Reply(reqId, settings.Public()); break;
+                    var next = settings.Draft(p); settings.Save(next); Reply(reqId, await PublicSettings()); break;
                 case "connection.check":
                     var draft = settings.Draft(p);
                     await api.Check(draft, SettingsStore.Decrypt(draft), lifetime.Token);
@@ -164,7 +174,7 @@ internal sealed class MainForm : Form
                     var selected = string.IsNullOrEmpty(selectionId) ? new Conversation() : Current(selectionId);
                     SelectOptions(selected, p);
                     if (!string.IsNullOrEmpty(selectionId)) conversations.Save(selected);
-                    Reply(reqId, new { selected.ReasoningEffort, selected.Thinking }); break;
+                    Reply(reqId, new { selected.ReasoningEffort, selected.Thinking, selected.WebSearch }); break;
                 case "chat.stop":
                     var stopId = p.GetProperty("id").GetString()!;
                     if (generations.TryGetValue(stopId, out var stopping)) { stopping.Cancellation.Cancel(); await stopping.Completion; }
@@ -177,12 +187,18 @@ internal sealed class MainForm : Form
     }
 
     private Conversation Current(string id) => generations.TryGetValue(id, out var run) ? run.Conversation : conversations.Get(id);
+    private async Task<object> PublicSettings()
+    {
+        using var service = new SearchService();
+        return settings.Public(serverReady: await service.ServerReady(settings.Value.SearxngUrl, lifetime.Token));
+    }
 
     private AppSettings SelectOptions(Conversation c, JsonElement p)
     {
         var effort = p.TryGetProperty("reasoningEffort", out var e) ? e.GetString() : null;
         bool? thinking = p.TryGetProperty("thinking", out var t) ? t.GetBoolean() : null;
-        var snapshot = ConversationOptions.Apply(c, settings.Value, effort, thinking);
+        bool? webSearch = p.TryGetProperty("webSearch", out var web) ? web.GetBoolean() : null;
+        var snapshot = ConversationOptions.Apply(c, settings.Value, effort, thinking, webSearch);
         settings.Save(); return snapshot;
     }
     private async Task Generate(string reqId, JsonElement p)
@@ -198,6 +214,7 @@ internal sealed class MainForm : Form
         ChatHistory.Prepare(c, content, retry, editIndex);
         var run = new Generation(c, snapshot, CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token));
         generations.Add(c.Id, run);
+        run.SearchEvent += data => Post(new { reqId, @event = "search", conversationId = c.Id, data });
         try
         {
             run.Completion = run.Run(api, conversations, (kind, text, error) =>

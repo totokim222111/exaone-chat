@@ -9,28 +9,33 @@
   <link rel="stylesheet" href="app.css">
   <link rel="stylesheet" href="shared/vendor/katex.min.css">
   <link rel="stylesheet" href="shared/render.css">
+  <link rel="stylesheet" href="workspace.css">
   <script defer src="shared/vendor/marked.min.js"></script>
   <script defer src="shared/vendor/purify.min.js"></script>
   <script defer src="shared/vendor/highlight.min.js"></script>
   <script defer src="shared/vendor/katex.min.js"></script>
+  <script defer src="shared/search.js"></script>
+  <script defer src="shared/search-settings.js"></script>
   <script defer src="shared/render.js"></script>
   <script defer src="shared/chat.js"></script>
   <script defer src="shared/session.js"></script>
+  <script defer src="workspace.js"></script>
   <script defer src="app.js"></script>
 </head>
-<body>
+<body class="web-app">
   <button id="sidebarShade" class="sidebar-shade" aria-label="목록 닫기" hidden></button>
   <aside id="sidebar" class="sidebar" aria-label="대화 목록">
     <div class="brand">EXAONE</div>
     <div class="sidebar-actions"><button id="newChat" class="outline">새 대화</button></div>
-    <div class="conversation-search"><input id="conversationSearch" type="search" placeholder="대화 검색" aria-label="대화 검색" autocomplete="off"></div>
+    <div class="conversation-search"><input id="conversationSearch" type="search" maxlength="100" placeholder="대화 검색" aria-label="대화 검색" autocomplete="off"><button id="manageChats" type="button">관리</button></div>
     <nav id="conversationList" class="conversation-list" aria-label="저장된 대화"></nav>
+    <div id="manageBar" class="manage-bar" hidden><div><span id="selectedCount">0개 선택</span><button id="deleteSelected" class="hold-action" type="button" data-hold-label="삭제"><span>삭제</span></button><button id="finishManage" type="button">완료</button></div><button id="deleteUnstarred" class="hold-action hold-text" type="button" data-hold-label="즐겨찾기 빼고 모두 삭제"><span>즐겨찾기 빼고 모두 삭제</span></button><p id="managementNotice" class="manage-notice" role="status" hidden></p></div>
     <footer class="sidebar-footer"><button id="openSettings">설정</button><span id="keyStatus" class="status"><i></i><span>키 없음</span></span></footer>
   </aside>
   <main>
     <header class="topbar">
       <button id="toggleList" aria-expanded="false" aria-controls="sidebar">목록</button>
-      <h1 id="chatTitle">새 대화</h1>
+      <h1 id="chatTitle">새 대화</h1><button id="starChat" class="star-toggle" type="button" aria-pressed="false" hidden><i hidden></i><span>즐겨찾기</span></button>
       <div class="model-status"><span id="modelLabel"></span></div>
       <button id="exportChat" type="button" disabled>내보내기</button>
     </header>
@@ -52,16 +57,21 @@
       </section>
       <section id="messages" class="messages" aria-label="메시지" hidden></section>
     </div>
+    <p id="workspaceNotice" class="workspace-notice" role="status" hidden></p>
+    <p id="attachmentNotice" class="workspace-notice" role="alert" hidden></p>
     <p id="generationLimit" class="generation-limit" role="status" hidden></p>
     <div class="jump-wrap"><button id="jumpBottom" class="jump-bottom" type="button" hidden>맨 아래로</button></div>
     <div id="composerWrap" class="composer-wrap" hidden>
       <form id="composer" class="composer">
+        <div id="attachmentChips" class="attachment-chips" hidden></div>
         <textarea id="messageInput" rows="1" placeholder="메시지를 입력하세요" aria-label="메시지" disabled></textarea>
-        <div class="composer-bottom"><div class="composer-left"><div id="reasoningChoice" class="generation-choice"><span class="generation-label">추론</span><div class="generation-options" role="group" aria-label="추론 강도"><button type="button" data-effort="low" aria-pressed="false">낮음</button><button type="button" data-effort="high" aria-pressed="false">높음</button><button type="button" data-effort="max" aria-pressed="true">최대</button></div></div><div id="thinkingChoice" class="generation-choice" hidden><span class="generation-label">생각</span><div class="generation-options" role="group" aria-label="생각 모드"><button type="button" data-thinking="false" aria-pressed="false">끔</button><button type="button" data-thinking="true" aria-pressed="true">켬</button></div></div><span id="streamStatus" class="status" aria-live="polite"></span></div><button id="sendButton" class="primary" type="submit">보내기</button></div>
+        <div class="composer-bottom"><div class="composer-left"><button id="attachFiles" class="attach-files" type="button">첨부</button><div id="reasoningChoice" class="generation-choice"><span class="generation-label">추론</span><div class="generation-options" role="group" aria-label="추론 강도"><button type="button" data-effort="low" aria-pressed="false">낮음</button><button type="button" data-effort="high" aria-pressed="false">높음</button><button type="button" data-effort="max" aria-pressed="true">최대</button></div></div><div id="thinkingChoice" class="generation-choice" hidden><span class="generation-label">생각</span><div class="generation-options" role="group" aria-label="생각 모드"><button type="button" data-thinking="false" aria-pressed="false">끔</button><button type="button" data-thinking="true" aria-pressed="true">켬</button></div></div><div id="searchChoice" class="generation-choice"><span class="generation-label">검색</span><div class="generation-options" role="group" aria-label="웹 검색"><button type="button" data-search="false" aria-pressed="true">끔</button><button type="button" data-search="true" aria-pressed="false">켬</button></div></div><button id="searchSettingsLink" class="search-settings-link" type="button" hidden>설정</button><span id="streamStatus" class="status" aria-live="polite"></span></div><button id="sendButton" class="primary" type="submit">보내기</button></div>
       </form>
       <p id="inputHint" class="input-hint">Enter 보내기 · Shift+Enter 줄바꿈</p>
     </div>
   </main>
+  <input id="attachmentInput" type="file" multiple hidden>
+  <div id="fileDropZone" class="file-drop-zone" hidden><span>여기에 놓으면 첨부</span></div>
   <div id="settingsOverlay" class="settings-overlay" hidden>
     <button id="settingsShade" class="settings-shade" aria-label="설정 닫기"></button>
     <section id="settingsPanel" class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" tabindex="-1">
@@ -75,6 +85,13 @@
             <button id="checkConnection" class="outline" type="button">연결 확인</button>
             <p class="field-note">연결 확인 시 현재 설정을 저장합니다.</p>
             <div id="connectionResult" class="connection-result" role="status"></div>
+          </section>
+          <section id="searchSettings" class="settings-section"><h3>검색</h3>
+            <div class="field"><span class="field-caption">제공자</span><div class="provider-options generation-options" role="group" aria-label="검색 제공자"><button type="button" data-provider="auto" aria-pressed="true">자동</button><button type="button" data-provider="searxng" aria-pressed="false">SearXNG</button><button type="button" data-provider="tavily" aria-pressed="false">Tavily</button><button type="button" data-provider="brave" aria-pressed="false">Brave</button></div></div>
+            <p id="searxngStatus" class="search-server-status">없음</p>
+            <div class="field"><div class="field-label"><label for="tavilyKey">Tavily 키</label><button id="deletetavilyKey" type="button">키 삭제</button></div><input id="tavilyKey" type="password" autocomplete="off" spellcheck="false" maxlength="8192"><p class="field-note"><a href="https://tavily.com" target="_blank" rel="noopener noreferrer">Tavily에서 키 발급</a></p></div>
+            <div class="field"><div class="field-label"><label for="braveKey">Brave 키</label><button id="deletebraveKey" type="button">키 삭제</button></div><input id="braveKey" type="password" autocomplete="off" spellcheck="false" maxlength="8192"><p class="field-note"><a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer">Brave에서 키 발급</a></p></div>
+            <button id="checkSearch" class="outline" type="button">검색 확인</button><div id="searchResult" class="connection-result" role="status"></div>
           </section>
           <section class="settings-section"><h3>응답</h3>
             <div class="field"><label for="temperature">Temperature</label><div class="range-row"><input id="temperatureRange" aria-label="Temperature 슬라이더" type="range" min="0" max="2" step="0.05"><input id="temperature" type="number" min="0" max="2" step="0.05" required></div></div>

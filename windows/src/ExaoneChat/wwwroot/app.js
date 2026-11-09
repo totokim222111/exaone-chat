@@ -1,7 +1,7 @@
 'use strict';
 (() => {
   const $ = id => document.getElementById(id);
-  const defaults = { hasKey: false, keySuffix: '', baseUrl: 'https://api.exaone.ai/v1', model: 'k-exaone_v2.5', systemPrompt: '', temperature: 1, topP: .95, maxTokens: 8192, thinking: true, reasoningEffort: 'max' };
+  const defaults = { hasKey: false, keySuffix: '', baseUrl: 'https://api.exaone.ai/v1', model: 'k-exaone_v2.5', systemPrompt: '', temperature: 1, topP: .95, maxTokens: 8192, thinking: true, reasoningEffort: 'max', webSearch: false, searchProvider: 'auto', searxngUrl: 'http://127.0.0.1:8888', searchKeys: { tavily: { hasKey: false }, brave: { hasKey: false } } };
   const isOfficial = baseUrl => { try { return new URL(baseUrl).hostname === 'api.exaone.ai'; } catch { return false; } };
   const authGuidance = 'API 키나 주소를 확인하세요. EXAONE API 키는 https://api.exaone.ai/v1 에서 씁니다.';
   const state = { settings: { ...defaults }, conversations: [], current: null, view: 0, deletingKey: false, composing: false, lastFocus: null };
@@ -35,9 +35,15 @@
     });
   }
 
+  function searchAvailable() {
+    const provider = state.settings.searchProvider || 'auto', keys = state.settings.searchKeys;
+    const server = state.settings.search ? state.settings.search.serverProvider === 'searxng' : !!state.settings.searxngUrl;
+    return provider === 'auto' ? !!(server || keys?.tavily?.hasKey || keys?.brave?.hasKey) : provider === 'searxng' ? server : !!keys?.[provider]?.hasKey;
+  }
   const sessions = ExaSession.create({
     current: () => state.current, settings: () => state.settings, official: isOfficial, limit: 8,
     ready: () => true,
+    searchAvailable, openSettings,
     persist: async (values, id) => { await request('chat.selection', { ...values, id }); },
     changed: () => { updateSettingsSummary(); renderList(); renderAppError(); }
   });
@@ -61,12 +67,17 @@
   function saveDraft() { sessions.drafts.set(state.current?.id || 'new', $('messageInput').value); }
   function restoreDraft() { $('messageInput').value = sessions.drafts.get(state.current?.id || 'new') || ''; autoSize(); }
   const chat = ExaChat.create({
-    current: () => state.current, busy: () => sessions.busy(), stream: () => sessions.runs.get(state.current?.id)?.started ? sessions.runs.get(state.current.id).conversation : null,
+    current: () => state.current, run: () => sessions.runs.get(state.current?.id), busy: () => sessions.busy(), stream: () => sessions.runs.get(state.current?.id)?.started ? sessions.runs.get(state.current.id).conversation : null,
     copy: copyText, saveFile: (name, mime, text) => request('saveFile', { name, mime, text }),
     edit: (message, index, content) => sendMessage(false, { messageId: message.id, index, content }),
     retry: () => sendMessage(true), settings: openSettings, errorText: errorMessage,
     needsKey: error => error.auth || [401, 403].includes(error.status), showError,
     maxMessageChars: () => 200000
+  });
+  const searchSettings = ExaSearchSettings.create({
+    settings: () => state.settings, keys: () => state.settings.searchKeys,
+    serverAvailable: () => state.settings.search ? state.settings.search.serverProvider === 'searxng' : !!state.settings.searxngUrl,
+    check: async () => { return request('search.test', settingsPayload()); }, changed: updateSettingsSummary
   });
   function updateSettingsSummary() {
     const s = state.settings;
@@ -207,10 +218,16 @@
       const result = await request('chat.send', { id: run.id, content, retry, ...run.selection, ...(edit ? { editIndex: edit.index } : {}) }, event => {
         if (event.conversationId !== run.id) return;
         if (event.event === 'start') {
-          run.started = true; run.conversation = sessions.adopt(event.conversation); upsertConversation(run.conversation);
+          run.started = true; run.conversation = sessions.adopt(event.conversation);
+          if (run.selection.webSearch) run.conversation.messages.at(-1).search ||= { queries: [], provider: null, sources: [], stage: 'pending' };
+          upsertConversation(run.conversation);
           if (state.current?.id === run.id) { state.current = run.conversation; chat.follow(); renderConversation(); }
           renderList();
+        } else if (event.event === 'search') {
+          ExaSearch.apply(run.conversation.messages.at(-1), event.data);
+          if (state.current?.id === run.id) scheduleAnswerRender();
         } else if (event.event === 'content' || event.event === 'reasoning') {
+          run.phases[event.event === 'content' ? 'answer' : 'reasoning'] ||= Date.now();
           const message = run.conversation.messages.at(-1); if (!message) return;
           if (event.event === 'content') message.content = (message.content + event.text).trimStart(); else message.reasoning = (message.reasoning || '') + event.text;
           if (state.current?.id === run.id) scheduleAnswerRender();
@@ -250,7 +267,7 @@
   function openSettings() {
     if (!$('settingsOverlay').hidden) return;
     state.lastFocus = document.activeElement; state.deletingKey = false;
-    const s = state.settings;
+    const s = state.settings; searchSettings.refresh();
     for (const id of ['baseUrl', 'model', 'systemPrompt', 'temperature', 'topP', 'maxTokens']) $(id).value = s[id];
     $('temperatureRange').value = s.temperature; $('topPRange').value = s.topP;
     updateProviderFields();
@@ -261,6 +278,7 @@
     $('settingsOverlay').hidden = false; closeSidebar(); $('settingsPanel').focus();
   }
   function closeSettings() {
+    searchSettings.clearSecrets();
     $('apiKey').value = ''; $('settingsOverlay').hidden = true;
     state.lastFocus?.focus();
   }
@@ -271,7 +289,7 @@
   function settingsPayload() {
     return { baseUrl: $('baseUrl').value.trim(), model: $('model').value.trim(), systemPrompt: $('systemPrompt').value,
       temperature: Number($('temperature').value), topP: Number($('topP').value), maxTokens: Number($('maxTokens').value),
-      newApiKey: $('apiKey').value.trim(), deleteKey: state.deletingKey };
+      ...searchSettings.payload(), newApiKey: $('apiKey').value.trim(), deleteKey: state.deletingKey };
   }
   async function saveSettings(event) {
     event.preventDefault(); $('saveSettings').disabled = true;
@@ -280,6 +298,7 @@
       $('apiKey').value = ''; $('apiKey').placeholder = state.settings.hasKey ? `저장됨 ••••${state.settings.keySuffix}` : 'API 키 입력';
       state.deletingKey = false; $('deleteKey').textContent = '키 삭제'; $('deleteKey').disabled = !state.settings.hasKey;
       $('keyNote').textContent = state.settings.hasKey ? '빈칸으로 저장하면 기존 키를 유지합니다.' : '이 Windows 계정에서 암호화해 저장합니다.';
+      searchSettings.refresh();
       $('saveResult').textContent = `저장됨 · ${time(new Date())}`; updateSettingsSummary();
     } catch (error) { $('saveResult').textContent = errorMessage(error); }
     finally { $('saveSettings').disabled = false; }
@@ -355,7 +374,7 @@
     const streams = new Map();
     let counter = 0;
     for (const c of items) for (const message of c.messages) message.id = 'preview-message-' + ++counter;
-    const list = () => items.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, title, updatedAt, model, reasoningEffort, thinking }) => ({ id, title, updatedAt, model, reasoningEffort, thinking }));
+    const list = () => items.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map(({ id, title, updatedAt, model, reasoningEffort, thinking, webSearch }) => ({ id, title, updatedAt, model, reasoningEffort, thinking, webSearch }));
     const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     async function postMessage(m) {
       const { reqId, type, payload: p } = m;
@@ -368,19 +387,21 @@
           case 'settings.get': reply(settings); break;
           case 'settings.save': {
             validate(p);
-            const { newApiKey, deleteKey, ...safe } = p;
+            const { newApiKey, deleteKey, tavilyKey, braveKey, ...safe } = p;
+            for (const [name, value] of [['tavily', tavilyKey], ['brave', braveKey]]) if (value !== undefined) settings.searchKeys[name] = { hasKey: !!value, last4: value.slice(-4) };
             settings = { ...settings, ...safe };
             if (deleteKey) { settings.hasKey = false; settings.keySuffix = ''; }
             if (newApiKey) { settings.hasKey = true; settings.keySuffix = newApiKey.slice(-4); }
             reply(settings); break;
           }
+          case 'search.test': reply({ ok: true, provider: p.searchProvider === 'auto' ? 'searxng' : p.searchProvider, resultCount: 8, latencyMs: 900, message: '검색을 확인했습니다.' }); break;
           case 'connection.check': validate(p); await pause(450); if (!(p.newApiKey || settings.hasKey) || (p.deleteKey && !p.newApiKey)) throw { message: authGuidance, status: 401, auth: true }; reply({ message: '연결됨' }); break;
           case 'chat.selection': {
-            const c = items.find(x => x.id === p.id); const selected = { reasoningEffort: p.reasoningEffort, thinking: p.thinking };
+            const c = items.find(x => x.id === p.id); const selected = { reasoningEffort: p.reasoningEffort, thinking: p.thinking, webSearch: p.webSearch };
             settings = { ...settings, ...selected }; if (c) Object.assign(c, selected); reply(selected); break;
           }
           case 'conversations.create': {
-            const c = { id: 'preview-new-' + ++counter, title: '새 대화', model: settings.model, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [], reasoningEffort: p.reasoningEffort || settings.reasoningEffort, thinking: p.thinking ?? settings.thinking };
+            const c = { id: 'preview-new-' + ++counter, title: '새 대화', model: settings.model, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), messages: [], reasoningEffort: p.reasoningEffort || settings.reasoningEffort, thinking: p.thinking ?? settings.thinking, webSearch: p.webSearch ?? settings.webSearch };
             items.unshift(c); reply(c); break;
           }
           case 'conversations.list': reply(list()); break;
@@ -393,7 +414,7 @@
             if (streams.has(p.id)) throw { message: '이미 답변을 만드는 중입니다.' };
             if (streams.size >= 8) throw { message: '동시에 8개까지 답변을 받을 수 있습니다.' };
             const c = items.find(x => x.id === p.id); if (!c) throw { message: '대화를 찾을 수 없습니다.' };
-            const selected = { reasoningEffort: p.reasoningEffort || c.reasoningEffort || settings.reasoningEffort, thinking: p.thinking ?? c.thinking ?? settings.thinking };
+            const selected = { reasoningEffort: p.reasoningEffort || c.reasoningEffort || settings.reasoningEffort, thinking: p.thinking ?? c.thinking ?? settings.thinking, webSearch: p.webSearch ?? c.webSearch ?? settings.webSearch };
             Object.assign(c, selected); settings = { ...settings, ...selected };
             const snapshot = { ...settings }; const slow = snapshot.keySuffix === 'slow';
             if (Number.isInteger(p.editIndex)) { c.messages[p.editIndex].content = p.content; c.messages.splice(p.editIndex + 1); }
@@ -403,16 +424,26 @@
             const active = { stopped: false }; streams.set(c.id, active);
             emit('start', { conversation: c });
             try {
+              const started = Date.now(); let reasonAt, answerAt, firstAt, searchMs = null;
+              if (selected.webSearch) {
+                const queries = [c.messages.at(-2).content, 'EXAONE 공식 문서'];
+                answer.search = { queries, provider: 'searxng', sources: [], error: null };
+                emit('search', { data: { stage: 'queries', queries } }); await pause(150);
+                answer.search.sources = Array.from({length:4}, (_, index) => ({ n:index+1,title:['EXAONE API 문서','모델 소개','사용 안내','연구 자료'][index],url:'https://docs.exaone.ai/reference/'+(index+1),domain:'docs.exaone.ai',snippet:'EXAONE을 사용하는 방법과 모델의 동작을 설명하는 검수용 검색 결과입니다.' }));
+                emit('search', { data: { stage: 'results', provider: 'searxng', sources: answer.search.sources } }); searchMs = Date.now()-started;
+              }
+              const response = selected.webSearch ? example.replace('**EXAONE** mock 응답입니다.', '**EXAONE** mock 응답입니다. [1][2] 근거를 함께 확인하세요. [1, 3]') : example;
               const reason = '먼저 질문의 의도와 필요한 정보를 살펴봅니다.\n핵심을 작은 단계로 나눕니다.\n예시와 함께 답변을 정리합니다.';
               if (isOfficial(snapshot.baseUrl) || snapshot.thinking) for (const line of reason.match(/.{1,8}|\n/g) || []) {
                 if (active.stopped) break;
-                answer.reasoning += line; emit('reasoning', { text: line }); await pause(slow ? 100 : 65);
+                reasonAt ??= Date.now(); firstAt ??= reasonAt; answer.reasoning += line; emit('reasoning', { text: line }); await pause(slow ? 100 : 65);
               }
-              for (const text of example.match(/[\s\S]{1,36}/g) || []) {
+              for (const text of response.match(/[\s\S]{1,36}/g) || []) {
                 if (active.stopped) break;
-                answer.content = (answer.content + text).trimStart(); emit('content', { text }); await pause(slow ? 400 : 35);
+                answerAt ??= Date.now(); firstAt ??= answerAt; answer.content = (answer.content + text).trimStart(); emit('content', { text }); await pause(slow ? 400 : 35);
               }
               answer.usage = { promptTokens: 42, completionTokens: 567, reasoningTokens: 1234 }; answer.stopped = active.stopped;
+              answer.timing = { firstTokenMs: firstAt == null ? null : firstAt-started, reasoningMs: reasonAt == null ? null : (answerAt || Date.now())-reasonAt, answerMs: answerAt == null ? null : Date.now()-answerAt, totalMs: Date.now()-started, searchMs };
               c.updatedAt = new Date().toISOString();
               receive({ reqId, event: 'done', conversationId: c.id, ok: true, result: clone({ conversation: c, stopped: active.stopped, error: null }) });
             } finally { streams.delete(c.id); }

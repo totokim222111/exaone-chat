@@ -4,7 +4,7 @@ from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
 
-BASE = "http://localhost:8080"
+BASE = "http://127.0.0.1:8080"
 MOCK = "http://mock:9000/v1"
 ARTIFACTS = Path(__file__).parent / "frontend_artifacts"
 
@@ -136,7 +136,7 @@ def main():
                 assert "max 단계 1" not in exported
                 if mobile:
                     page.locator("#toggleList").click()
-                page.locator("#conversationSearch").fill("없는 제목")
+                page.locator("#conversationSearch").fill("힣")
                 expect(page.locator(".search-empty")).to_contain_text("검색 결과 없음")
                 page.locator(".search-empty button").click()
                 expect(page.locator(".conversation-open")).to_have_count(1)

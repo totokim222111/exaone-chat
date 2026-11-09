@@ -40,7 +40,7 @@ def main():
     for file in public.rglob("*"):
         if not file.is_file():
             continue
-        with urllib.request.urlopen("http://localhost:8080/" + file.relative_to(public).as_posix()) as response:
+        with urllib.request.urlopen("http://127.0.0.1:8080/" + file.relative_to(public).as_posix()) as response:
             assert response.status == 200 and response.read() == file.read_bytes(), file
             if file.suffix == ".woff2":
                 assert response.headers.get_content_type() == "font/woff2"
