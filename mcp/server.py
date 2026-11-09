@@ -19,6 +19,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from pydantic import BaseModel, Field
+from search_support import pipeline as search_pipeline
 
 DEFAULT_BASE_URL = "https://api.exaone.ai/v1"
 DEFAULT_MODEL = "k-exaone_v2.5"
@@ -81,6 +82,10 @@ class Config:
     model: str
     style_hosts: frozenset[str] = frozenset({"api.exaone.ai"})
     warning: str | None = None
+    search_provider: str = "auto"
+    searxng_url: str = "http://127.0.0.1:8888"
+    tavily_key: str | None = field(default=None, repr=False)
+    brave_key: str | None = field(default=None, repr=False)
 
     @property
     def exaone_style(self) -> bool:
@@ -118,7 +123,30 @@ def load_config() -> Config:
     model = os.environ.get("EXAONE_MODEL", "").strip() or setting("model") or DEFAULT_MODEL
     hosts = {"api.exaone.ai"}
     hosts.update(host.lower() for host in re.split(r"[,;\s]+", os.environ.get("EXAONE_STYLE_HOSTS", "")) if host)
-    return Config(key or None, key_source, base.rstrip("/"), model, frozenset(hosts), warning)
+    search_keys = {}
+    for provider, env in (("tavily", "TAVILY_API_KEY"), ("brave", "BRAVE_API_KEY")):
+        value = os.environ.get(env, "").strip()
+        if not value and setting(provider + "Key"):
+            try:
+                value = unprotect_key(setting(provider + "Key"))
+            except ExaoneError:
+                warning = "윈도우 앱 검색 키를 현재 Windows 사용자로 복호화할 수 없습니다"
+        search_keys[provider] = value or None
+    provider = os.environ.get("EXAONE_SEARCH_PROVIDER", "").strip() or setting("searchProvider") or "auto"
+    if provider not in ("auto", *search_pipeline.PROVIDERS):
+        provider = "auto"
+    searxng = os.environ.get("SEARXNG_URL", "").strip() or setting("searxngUrl") or "http://127.0.0.1:8888"
+    try:
+        parsed = urlsplit(searxng)
+        valid_search_url = parsed.scheme in ("http", "https") and parsed.hostname and not (
+            parsed.username or parsed.query or parsed.fragment)
+    except ValueError:
+        valid_search_url = False
+    if not valid_search_url:
+        searxng = ""
+        warning = "검색 서버 주소는 인증정보 없는 HTTP 또는 HTTPS 주소여야 합니다"
+    return Config(key or None, key_source, base.rstrip("/"), model, frozenset(hosts), warning,
+                  provider, searxng.rstrip("/"), search_keys["tavily"], search_keys["brave"])
 
 
 class HistoryMessage(BaseModel):
@@ -269,6 +297,41 @@ def format_completion(result: Completion, config: Config, effort: str, include_r
     return redact("\n\n".join(parts), config.api_key)
 
 
+async def prepare_search(config, body, prompt, limit):
+    async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
+        queries = await search_pipeline.plan_queries(client, config.base_url, config.api_key,
+            search_pipeline.query_body(config.model, body["messages"], prompt, config.exaone_style,
+                urlsplit(config.base_url).hostname == "api.friendli.ai"), prompt)
+        return await search_pipeline.search_queries(client, queries, config.search_provider,
+            config.tavily_key, config.brave_key, config.searxng_url, limit=limit)
+
+
+def format_search_completion(result, config, search, elapsed, include_reasoning=False):
+    parts = [result.content or "(답변 본문 없음: max_tokens를 늘려 다시 요청하세요.)"]
+    if include_reasoning and result.reasoning:
+        parts.insert(0, "## 생각 과정\n" + result.reasoning)
+    if search["sources"]:
+        parts.append("출처:\n" + "\n".join(f'[{s["n"]}] {s["title"]} — {s["url"]}' for s in search["sources"]))
+    if search["error"]:
+        parts.append("검색 안내: " + search["error"])
+    tokens = result.usage
+    parts.append(f'검색 제공자: {search["provider"] or "없음"} | 검색어: {len(search["queries"])}개 | '
+        f'토큰(입력/출력/추론): {tokens.get("prompt_tokens", "미제공")}/{tokens.get("completion_tokens", "미제공")}/'
+        f'{tokens.get("reasoning_tokens", "미제공")} | 시간: {elapsed:.2f}초')
+    text = "\n\n".join(parts)
+    for key in (config.api_key, config.tavily_key, config.brave_key):
+        text = redact(text, key)
+    return text
+
+
+async def search_status(config):
+    started = time.monotonic()
+    async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
+        ready = await search_pipeline.search_status(client, config.searxng_url)
+    available = [p for p, ok in (("tavily", config.tavily_key), ("brave", config.brave_key), ("searxng", ready)) if ok]
+    return f'검색: 사용 가능 {", ".join(available) or "없음"} | SearXNG 응답: {"성공" if ready else "실패"} | 지연: {(time.monotonic() - started) * 1000:.0f}ms'
+
+
 mcp = FastMCP("EXAONE", instructions="LG EXAONE에 질문하거나 연결 상태를 확인합니다. Query LG EXAONE or check its connection.")
 
 
@@ -276,8 +339,9 @@ mcp = FastMCP("EXAONE", instructions="LG EXAONE에 질문하거나 연결 상태
           "Ask LG EXAONE for an independent answer, analysis, code review, Korean writing, or a second opinion. "
           "history는 이전 user/assistant 대화이며 system은 지침입니다. 추론은 항상 켜지고 max_tokens에 포함됩니다. "
           "Reasoning is always enabled and counts toward max_tokens; include_reasoning exposes the model's reasoning output. "
-          "EXAONE은 웹 검색을 못 하므로 최신 정보가 필요하면 먼저 검색한 결과를 prompt에 넣어 전달하세요. "
-          "EXAONE cannot browse the web: when current facts matter, search first and include the findings in the prompt. "
+          "최신 정보가 필요하면 web_search=true로 부르면 MCP 서버가 직접 검색합니다(Claude가 따로 검색할 필요 없음). "
+          "web_search를 쓰거나, 이미 가진 자료가 있으면 prompt에 넣으세요. "
+          "For current information use web_search=true: this server searches and answers directly; Claude need not search separately. "
           "reasoning_effort를 생략하면 EXAONE_DEFAULT_EFFORT 환경변수(기본 high)를 씁니다.")
 async def ask_exaone(
     prompt: Annotated[str, Field(min_length=1, description="질문 또는 작업 / Question or task")],
@@ -287,17 +351,33 @@ async def ask_exaone(
     include_reasoning: bool = False,
     temperature: Annotated[float, Field(allow_inf_nan=False)] | None = None,
     history: list[HistoryMessage] | None = None,
+    web_search: bool = False,
+    search_results: Annotated[int, Field(ge=1, le=10)] = 6,
 ) -> str:
     config = load_config()
     if reasoning_effort is None:
         env_effort = os.environ.get("EXAONE_DEFAULT_EFFORT", "").strip().lower()
         reasoning_effort = env_effort if env_effort in ("low", "high", "max") else "high"
     try:
+        started = time.monotonic()
         body = build_body(config, prompt, system, reasoning_effort, max_tokens, temperature, history)
+        search = None
+        if web_search:
+            if not config.api_key:
+                raise ExaoneError("EXAONE API 키가 없습니다")
+            if not 1 <= search_results <= 10:
+                raise ExaoneError("검색 결과 수는 1–10이어야 합니다")
+            search = await prepare_search(config, body, prompt, search_results)
+            body["messages"] = search_pipeline.with_search_context(body["messages"], search)
         result = await request_completion(config, body)
+        if search is not None:
+            return format_search_completion(result, config, search, time.monotonic() - started, include_reasoning)
         return format_completion(result, config, reasoning_effort, include_reasoning)
     except ExaoneError as exc:
-        raise ToolError(error_text(exc, config)) from None
+        text = error_text(exc, config)
+        for secret in (config.tavily_key, config.brave_key):
+            text = redact(text, secret)
+        raise ToolError(text) from None
     except Exception:
         # Never forward arbitrary exception reprs: HTTP/settings exceptions can contain secrets.
         raise ToolError("EXAONE 요청 처리 중 내부 오류가 발생했습니다 (상태코드: 없음).") from None
@@ -314,6 +394,7 @@ async def exaone_status() -> str:
              f"Base URL: {config.base_url}", f"모델: {config.model}"]
     if config.warning:
         lines.append(f"설정 안내: {config.warning}")
+    lines.append(await search_status(config))
     started = time.monotonic()
     try:
         body = build_body(config, "연결 확인입니다. OK라고 짧게 답하세요.", reasoning_effort="low", max_tokens=64)
@@ -323,7 +404,10 @@ async def exaone_status() -> str:
         lines.append(f"연결 확인: 실패 | {error_text(exc, config)} | 지연 시간: {time.monotonic() - started:.2f}초")
     except Exception:
         lines.append(f"연결 확인: 실패 | 내부 오류 (상태코드: 없음) | 지연 시간: {time.monotonic() - started:.2f}초")
-    return redact("\n".join(lines), config.api_key)
+    result = "\n".join(lines)
+    for key in (config.api_key, config.tavily_key, config.brave_key):
+        result = redact(result, key)
+    return result
 
 
 if __name__ == "__main__":

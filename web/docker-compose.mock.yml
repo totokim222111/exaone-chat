@@ -1,0 +1,17 @@
+services:
+  api:
+    environment:
+      ALLOWED_BASE_URLS: ${ALLOWED_BASE_URLS:-https://api.exaone.ai/v1,https://api.friendli.ai/serverless/v1},http://mock:9000/v1
+      EXAONE_STYLE_HOSTS: api.exaone.ai,mock
+      SEARXNG_URL: http://mock:9000
+    depends_on:
+      mock:
+        condition: service_healthy
+  mock:
+    build: ./tools/mock_upstream
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped

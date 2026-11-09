@@ -1,0 +1,12 @@
+use_default_settings: true
+search:
+  formats: [html, json]
+  default_lang: auto
+server:
+  # SearXNG overrides this placeholder with the SEARXNG_SECRET environment variable.
+  secret_key: local-only-overridden-by-SEARXNG_SECRET
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  bind_address: "0.0.0.0"
+  port: 8080

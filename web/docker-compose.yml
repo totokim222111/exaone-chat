@@ -1,0 +1,70 @@
+services:
+  web:
+    build: ./frontend
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+  api:
+    build: ./backend
+    environment:
+      DB_HOST: db
+      DB_NAME: ${POSTGRES_DB:-exaone}
+      DB_USER: ${POSTGRES_USER:-exaone}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-exaone-local-password}
+      APP_SECRET: ${APP_SECRET:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      DEFAULT_BASE_URL: ${DEFAULT_BASE_URL:-https://api.exaone.ai/v1}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-k-exaone_v2.5}
+      MODELS: ${MODELS:-k-exaone_v2.5,LGAI-EXAONE/K-EXAONE-2.0-750B-A37B,LGAI-EXAONE/K-EXAONE-236B-A23B}
+      EXAONE_STYLE_HOSTS: ${EXAONE_STYLE_HOSTS:-api.exaone.ai}
+      ALLOWED_BASE_URLS: ${ALLOWED_BASE_URLS:-https://api.exaone.ai/v1,https://api.friendli.ai/serverless/v1}
+      ALLOW_CUSTOM_BASE_URL: ${ALLOW_CUSTOM_BASE_URL:-false}
+      SEARXNG_URL: ${SEARXNG_URL:-http://searxng:8080}
+    volumes:
+      - apidata:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+  searxng:
+    image: searxng/searxng:2026.11.8-3a3dd15bf
+    ports:
+      - "127.0.0.1:${SEARXNG_PORT:-8888}:8080"
+    environment:
+      # Local-only default; set SEARXNG_SECRET for your own installation.
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-exaone-local-only-search-secret-change-me}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-exaone}
+      POSTGRES_USER: ${POSTGRES_USER:-exaone}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-exaone-local-password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+volumes:
+  pgdata:
+  apidata:
