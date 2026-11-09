@@ -1,21 +1,27 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Collections.Concurrent;
 
 namespace ExaoneChat;
 
 internal static class AtomicFile
 {
+    private static readonly ConcurrentDictionary<string, object> Gates = new(StringComparer.OrdinalIgnoreCase);
+    public static object Gate(string path) => Gates.GetOrAdd(Path.GetFullPath(path), _ => new());
     public static void Write<T>(string path, T value)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temp = path + ".tmp";
-        using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        lock (Gate(path))
         {
-            JsonSerializer.Serialize(file, value, Json.Options);
-            file.Flush(true);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var temp = path + ".tmp";
+            using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(file, value, Json.Options);
+                file.Flush(true);
+            }
+            File.Move(temp, path, true);
         }
-        File.Move(temp, path, true);
     }
 }
 
@@ -65,7 +71,7 @@ internal sealed class SettingsStore
         s.Temperature = input.GetProperty("temperature").GetDouble();
         s.TopP = input.GetProperty("topP").GetDouble();
         s.MaxTokens = input.GetProperty("maxTokens").GetInt32();
-        s.Thinking = input.GetProperty("thinking").GetBoolean();
+        if (input.TryGetProperty("thinking", out var thinking)) s.Thinking = thinking.GetBoolean();
         if (input.TryGetProperty("reasoningEffort", out var effort)) s.ReasoningEffort = effort.GetString() ?? "max";
         Validate(s);
         if (input.TryGetProperty("deleteKey", out var del) && del.GetBoolean()) s.ApiKey = "";
@@ -109,21 +115,21 @@ internal sealed class ConversationStore
         if (!Guid.TryParseExact(id, "N", out _)) throw new InvalidOperationException("대화 ID가 올바르지 않습니다.");
         return Path.Combine(folder, id + ".json");
     }
-    public Conversation Get(string id) => Json.Read<Conversation>(File.ReadAllText(PathFor(id)));
+    public Conversation Get(string id) { var path = PathFor(id); lock (AtomicFile.Gate(path)) return Json.Read<Conversation>(File.ReadAllText(path)); }
     public List<object> List()
     {
         var items = new List<Conversation>();
         var damaged = 0;
         foreach (var file in Directory.EnumerateFiles(folder, "*.json"))
         {
-            try { var c = Json.Read<Conversation>(File.ReadAllText(file)); PathFor(c.Id); items.Add(c); }
+            try { lock (AtomicFile.Gate(file)) { var c = Json.Read<Conversation>(File.ReadAllText(file)); PathFor(c.Id); items.Add(c); } }
             catch (Exception ex) when (ex is JsonException or IOException or InvalidOperationException) { damaged++; }
         }
         if (damaged > 0) throw new InvalidDataException($"읽을 수 없는 대화 파일 {damaged}개가 있습니다. data/conversations를 확인하세요. 원본은 보존되었습니다.");
-        return items.OrderByDescending(c => c.UpdatedAt).Select(c => (object)new { c.Id, c.Title, c.UpdatedAt, c.Model }).ToList();
+        return items.OrderByDescending(c => c.UpdatedAt).Select(c => (object)new { c.Id, c.Title, c.UpdatedAt, c.Model, c.ReasoningEffort, c.Thinking }).ToList();
     }
-    public void Save(Conversation c) { c.UpdatedAt = DateTimeOffset.Now; AtomicFile.Write(PathFor(c.Id), c); }
-    public void Delete(string id) => File.Delete(PathFor(id));
+    public void Save(Conversation c) { var path = PathFor(c.Id); lock (AtomicFile.Gate(path)) { c.UpdatedAt = DateTimeOffset.Now; AtomicFile.Write(path, c); } }
+    public void Delete(string id) { var path = PathFor(id); lock (AtomicFile.Gate(path)) File.Delete(path); }
     public void Rename(string id, string title)
     {
         var c = Get(id); c.Title = string.IsNullOrWhiteSpace(title) ? "새 대화" : title.Trim()[..Math.Min(title.Trim().Length, 200)]; Save(c);

@@ -85,7 +85,7 @@ internal sealed class ApiClient : IDisposable
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested) { throw new ApiException("연결 확인 시간이 초과되었습니다."); }
     }
-    public async Task Stream(AppSettings s, string key, IEnumerable<ChatMessage> messages, Action<string, string> emit, CancellationToken ct)
+    public async Task Stream(AppSettings s, string key, IEnumerable<ChatMessage> messages, Action<string, string> emit, CancellationToken ct, Action<ChatUsage>? usage = null)
     {
         var contentStarted = false;
         void Emit(string kind, string value)
@@ -99,6 +99,7 @@ internal sealed class ApiClient : IDisposable
             emit(kind, value);
         }
         var splitter = new ReasoningSplitter(Emit);
+        ChatUsage? latestUsage = null;
         try
         {
             using var res = await Request(s, key, messages, true, ct);
@@ -115,6 +116,19 @@ internal sealed class ApiClient : IDisposable
                 {
                     using var doc = JsonDocument.Parse(payload);
                     var root = doc.RootElement;
+                    if (root.TryGetProperty("usage", out var used) && used.ValueKind == JsonValueKind.Object)
+                    {
+                        static long? Count(JsonElement node, string name) => node.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var count) && count >= 0 ? count : null;
+                        var prompt = Count(used, "prompt_tokens");
+                        var completion = Count(used, "completion_tokens");
+                        var reasoning = Count(used, "reasoning_tokens");
+                        if (reasoning is null && used.TryGetProperty("completion_tokens_details", out var details) && details.ValueKind == JsonValueKind.Object) reasoning = Count(details, "reasoning_tokens");
+                        if (prompt is not null || completion is not null || reasoning is not null)
+                        {
+                            latestUsage = new(prompt ?? latestUsage?.PromptTokens, completion ?? latestUsage?.CompletionTokens, reasoning ?? latestUsage?.ReasoningTokens);
+                            usage?.Invoke(latestUsage);
+                        }
+                    }
                     if (root.TryGetProperty("error", out _) || (!root.TryGetProperty("choices", out _) && root.TryGetProperty("result_code", out _)))
                         throw new ApiException(ErrorDetail(payload).Replace(key, "[키 숨김]", StringComparison.Ordinal));
                     if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0) return;

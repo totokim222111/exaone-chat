@@ -3,12 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; font-src https://cdn.jsdelivr.net; img-src 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://cdn.jsdelivr.net; style-src-attr 'unsafe-inline'; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>EXAONE</title>
+  <link rel="icon" href="shared/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="stylesheet" href="app.css">
-  <script defer src="vendor/marked.min.js"></script>
-  <script defer src="vendor/purify.min.js"></script>
+  <link rel="stylesheet" href="shared/vendor/katex.min.css">
+  <link rel="stylesheet" href="shared/render.css">
+  <script defer src="shared/vendor/marked.min.js"></script>
+  <script defer src="shared/vendor/purify.min.js"></script>
+  <script defer src="shared/vendor/highlight.min.js"></script>
+  <script defer src="shared/vendor/katex.min.js"></script>
+  <script defer src="shared/render.js"></script>
+  <script defer src="shared/chat.js"></script>
+  <script defer src="shared/session.js"></script>
   <script defer src="app.js"></script>
 </head>
 <body>
@@ -16,6 +24,7 @@
   <aside id="sidebar" class="sidebar" aria-label="대화 목록">
     <div class="brand">EXAONE</div>
     <div class="sidebar-actions"><button id="newChat" class="outline" title="새 대화 (Ctrl+N)">새 대화<span class="shortcut" aria-hidden="true">Ctrl N</span></button></div>
+    <div class="conversation-search"><input id="conversationSearch" type="search" placeholder="대화 검색" aria-label="대화 검색" autocomplete="off"></div>
     <nav id="conversationList" class="conversation-list" aria-label="저장된 대화"></nav>
     <footer class="sidebar-footer"><button id="openSettings">설정</button><span id="keyStatus" class="status"><i></i><span>키 없음</span></span></footer>
   </aside>
@@ -23,7 +32,8 @@
     <header class="topbar">
       <button id="toggleList" aria-expanded="false" aria-controls="sidebar">목록</button>
       <h1 id="chatTitle">새 대화</h1>
-      <div class="model-status"><span id="modelLabel"></span><span id="thinkingLabel">추론 최대</span></div>
+      <div class="model-status"><span id="modelLabel"></span></div>
+      <button id="exportChat" type="button" disabled>내보내기</button>
     </header>
     <div id="appError" class="app-error" role="alert" hidden></div>
     <div id="messageScroll" class="message-scroll">
@@ -32,10 +42,12 @@
       </section>
       <section id="messages" class="messages" aria-label="메시지" hidden></section>
     </div>
+    <p id="generationLimit" class="generation-limit" role="status" hidden></p>
+    <div class="jump-wrap"><button id="jumpBottom" class="jump-bottom" type="button" hidden>맨 아래로</button></div>
     <div class="composer-wrap">
       <form id="composer" class="composer">
         <textarea id="messageInput" rows="1" placeholder="메시지를 입력하세요" aria-label="메시지" maxlength="200000"></textarea>
-        <div class="composer-bottom"><span id="streamStatus" class="status" aria-live="polite"></span><button id="sendButton" class="primary" type="submit">보내기</button></div>
+        <div class="composer-bottom"><div class="composer-left"><div id="reasoningChoice" class="generation-choice"><span class="generation-label">추론</span><div class="generation-options" role="group" aria-label="추론 강도"><button type="button" data-effort="low" aria-pressed="false">낮음</button><button type="button" data-effort="high" aria-pressed="false">높음</button><button type="button" data-effort="max" aria-pressed="true">최대</button></div></div><div id="thinkingChoice" class="generation-choice" hidden><span class="generation-label">생각</span><div class="generation-options" role="group" aria-label="생각 모드"><button type="button" data-thinking="false" aria-pressed="false">끔</button><button type="button" data-thinking="true" aria-pressed="true">켬</button></div></div><span id="streamStatus" class="status" aria-live="polite"></span></div><button id="sendButton" class="primary" type="submit">보내기</button></div>
       </form>
       <p class="input-hint">Enter 보내기 · Shift+Enter 줄바꿈</p>
     </div>
@@ -54,15 +66,6 @@
             <div id="connectionResult" class="connection-result" role="status"></div>
           </section>
           <section class="settings-section"><h3>응답</h3>
-            <div id="officialReasoning" class="field">
-              <fieldset class="effort-field"><legend>추론 강도</legend><div class="effort-options">
-                <label><input type="radio" name="reasoningEffort" value="low"><span>낮음</span></label>
-                <label><input type="radio" name="reasoningEffort" value="high"><span>높음</span></label>
-                <label><input type="radio" name="reasoningEffort" value="max" checked><span>최대</span></label>
-              </div></fieldset>
-              <p class="reasoning-note">EXAONE API는 항상 생각 과정을 거칩니다.</p>
-            </div>
-            <div id="thinkingRow" class="switch-row" hidden><label for="thinking">생각 모드</label><input id="thinking" class="square-switch" type="checkbox" role="switch"></div>
             <div class="field"><label for="temperature">Temperature</label><div class="range-row"><input id="temperatureRange" aria-label="Temperature 슬라이더" type="range" min="0" max="2" step="0.05"><input id="temperature" type="number" min="0" max="2" step="0.05" required></div></div>
             <div class="field"><label for="topP">Top P</label><div class="range-row"><input id="topPRange" aria-label="Top P 슬라이더" type="range" min="0.01" max="1" step="0.01"><input id="topP" type="number" min="0.01" max="1" step="0.01" required></div></div>
             <div class="field"><label for="maxTokens">최대 토큰</label><input id="maxTokens" type="number" min="1" max="1048576" step="1" required></div>

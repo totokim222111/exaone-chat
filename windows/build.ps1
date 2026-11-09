@@ -5,6 +5,9 @@ Set-StrictMode -Version Latest
 $project = Join-Path $PSScriptRoot 'src/ExaoneChat/ExaoneChat.csproj'
 $dist = Join-Path $PSScriptRoot 'dist'
 
+& pwsh -NoProfile -File (Join-Path $PSScriptRoot '../shared/sync.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Shared UI sync failed.' }
+
 & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'tools/generate_icon.ps1')
 if ($LASTEXITCODE -ne 0) { throw 'Icon generation failed.' }
 

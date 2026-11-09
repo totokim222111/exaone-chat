@@ -31,11 +31,42 @@ internal sealed class AppSettings
 internal sealed record WindowPlacement(int X, int Y, int Width, int Height, bool Maximized);
 internal sealed class ChatMessage
 {
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
     public string Role { get; set; } = "user";
     public string Content { get; set; } = "";
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Reasoning { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ChatError? Error { get; set; }
+    public ChatUsage? Usage { get; set; }
+    public bool Stopped { get; set; }
+    public string? ReasoningEffort { get; set; }
+}
+internal sealed record ChatUsage(long? PromptTokens, long? CompletionTokens, long? ReasoningTokens);
+
+internal static class ChatHistory
+{
+    public static void Prepare(Conversation conversation, string content, bool retry, int? editIndex = null)
+    {
+        var messages = conversation.Messages;
+        if (editIndex is int index)
+        {
+            if (index < 0 || index >= messages.Count || messages[index].Role != "user") throw new InvalidOperationException("편집할 사용자 메시지가 없습니다.");
+            if (string.IsNullOrWhiteSpace(content)) throw new InvalidOperationException("메시지를 입력하세요.");
+            messages[index].Content = content.Trim();
+            messages.RemoveRange(index + 1, messages.Count - index - 1);
+        }
+        else if (retry)
+        {
+            if (messages.Count < 2 || messages[^1].Role != "assistant" || messages[^2].Role != "user") throw new InvalidOperationException("다시 생성할 답변이 없습니다.");
+            messages.RemoveAt(messages.Count - 1);
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(content)) throw new InvalidOperationException("메시지를 입력하세요.");
+            if (messages.Count == 0) conversation.Title = string.Concat(System.Globalization.StringInfo.GetTextElementEnumerator(content.Trim()).AsEnumerable().Take(30));
+            messages.Add(new() { Role = "user", Content = content.Trim() });
+        }
+    }
 }
 internal sealed record ChatError(string Message, int? Status = null)
 {
@@ -48,5 +79,20 @@ internal sealed class Conversation
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.Now;
     public string Model { get; set; } = "";
+    public string? ReasoningEffort { get; set; }
+    public bool? Thinking { get; set; }
     public List<ChatMessage> Messages { get; set; } = [];
+}
+
+internal static class ConversationOptions
+{
+    public static AppSettings Apply(Conversation c, AppSettings defaults, string? effort = null, bool? thinking = null)
+    {
+        var selected = effort ?? c.ReasoningEffort ?? defaults.ReasoningEffort;
+        if (selected is not ("low" or "high" or "max")) throw new InvalidOperationException("추론 강도를 확인하세요.");
+        c.ReasoningEffort = selected; c.Thinking = thinking ?? c.Thinking ?? defaults.Thinking;
+        defaults.ReasoningEffort = selected; defaults.Thinking = c.Thinking.Value;
+        var snapshot = Json.Read<AppSettings>(Json.Serialize(defaults));
+        return snapshot;
+    }
 }

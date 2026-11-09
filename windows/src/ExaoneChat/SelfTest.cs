@@ -209,6 +209,83 @@ internal static class SelfTest
             catch (InvalidOperationException) { }
             return Task.CompletedTask;
         });
+        await Test("edit user truncates following turns before regeneration", () =>
+        {
+            var c = new Conversation { Messages = [new() { Content = "before" }, new() { Role = "assistant", Content = "old answer", Usage = new(1, 2, 3) }, new() { Content = "later" }, new() { Role = "assistant", Content = "discard" }] };
+            var id = c.Messages[0].Id;
+            ChatHistory.Prepare(c, "edited", false, 0);
+            Assert(c.Messages.Count == 1 && c.Messages[0].Content == "edited" && c.Messages[0].Id == id, "Edit did not preserve user/truncate branch");
+            c.Messages.Add(new() { Role = "assistant", Content = "regenerated" });
+            var store = new ConversationStore(root); store.Save(c);
+            Assert(store.Get(c.Id).Messages.Count == 2 && store.Get(c.Id).Messages[^1].Content == "regenerated", "Edited generation persistence");
+            return Task.CompletedTask;
+        });
+        await Test("retry replaces only last assistant and preserves user", () =>
+        {
+            var c = new Conversation { Messages = [new() { Content = "first" }, new() { Role = "assistant", Content = "keep" }, new() { Content = "last user" }, new() { Role = "assistant", Content = "replace" }] };
+            var id = c.Messages[^2].Id;
+            ChatHistory.Prepare(c, "", true);
+            Assert(c.Messages.Count == 3 && c.Messages[^1].Id == id && c.Messages[1].Content == "keep", "Retry removed wrong turn");
+            c.Messages.Add(new() { Role = "assistant", Content = "new answer" });
+            Assert(c.Messages.Count == 4 && c.Messages.Count(m => m.Role == "user") == 2, "Retry duplicated user");
+            return Task.CompletedTask;
+        });
+        await Test("last usage chunk stored and returned to UI", async () =>
+        {
+            var c = new Conversation(); var answer = new ChatMessage { Role = "assistant" }; c.Messages.Add(answer);
+            await api.Stream(Settings("usage"), "mock-key", [new() { Content = "test" }], (kind, value) => { if (kind == "content") answer.Content += value; }, default, usage => answer.Usage = usage);
+            var store = new ConversationStore(root); store.Save(c); var saved = store.Get(c.Id).Messages[0];
+            Assert(saved.Usage == new ChatUsage(12, 567, 1234) && saved.Content == "사용량 답변" && Json.Serialize(saved).Contains("reasoningTokens"), "Usage persistence/bridge mismatch");
+        });
+        await Test("conversation options persist and request uses conversation override", () =>
+        {
+            var defaults = new AppSettings { ReasoningEffort = "max", Thinking = true };
+            var c = new Conversation();
+            var snapshot = ConversationOptions.Apply(c, defaults, "low", false);
+            var store = new ConversationStore(root); store.Save(c); var saved = store.Get(c.Id);
+            using var request = JsonDocument.Parse(Json.Serialize(ApiClient.Body(snapshot, [], true, "api.exaone.ai")));
+            Assert(saved.ReasoningEffort == "low" && saved.Thinking == false && request.RootElement.GetProperty("reasoning_effort").GetString() == "low", "Conversation request/options mismatch");
+            using var vllm = JsonDocument.Parse(Json.Serialize(ApiClient.Body(snapshot, [], true, "localhost")));
+            Assert(!vllm.RootElement.GetProperty("chat_template_kwargs").GetProperty("enable_thinking").GetBoolean(), "Thinking choice not sent");
+            return Task.CompletedTask;
+        });
+        await Test("new conversation inherits last choice and in-flight snapshot remains fixed", () =>
+        {
+            var defaults = new AppSettings(); var first = new Conversation();
+            var running = ConversationOptions.Apply(first, defaults, "low", false);
+            ConversationOptions.Apply(first, defaults, "high", true);
+            var next = new Conversation(); var nextRequest = ConversationOptions.Apply(next, defaults);
+            Assert(first.ReasoningEffort == "high" && next.ReasoningEffort == "high" && next.Thinking == true && nextRequest.ReasoningEffort == "high", "New conversation default lost");
+            Assert(running.ReasoningEffort == "low" && !running.Thinking, "Changing choice mutated in-flight settings");
+            return Task.CompletedTask;
+        });
+        await Test("parallel slow conversations keep independent buffers and durable files", async () =>
+        {
+            var store = new ConversationStore(root);
+            var a = new Conversation(); var b = new Conversation();
+            ChatHistory.Prepare(a, "대화 A", false); ChatHistory.Prepare(b, "대화 B", false);
+            var defaults = Settings("parallel");
+            var sa = ConversationOptions.Apply(a, defaults, "low", true);
+            var sb = ConversationOptions.Apply(b, defaults, "high", false);
+            using var ca = new CancellationTokenSource(); using var cb = new CancellationTokenSource();
+            var ga = new Generation(a, sa, ca); var gb = new Generation(b, sb, cb);
+            var partial = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            ga.Completion = ga.Run(api, store, (kind, text, error) => { if (kind == "content") partial.TrySetResult(); }, "slow");
+            await partial.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert(!ga.Completion.IsCompleted && a.Messages[^1].Content.Contains("대화 A"), "A did not retain its live partial");
+            gb.Completion = gb.Run(api, store, (_, _, _) => { }, "slow");
+            Assert(!ga.Completion.IsCompleted, "A blocked B start");
+            await Task.WhenAll(ga.Completion, gb.Completion);
+            var savedA = store.Get(a.Id); var savedB = store.Get(b.Id);
+            Assert(ga.Error is null && gb.Error is null && savedA.Messages[^1].Content.Contains("완료: 대화 A") && !savedA.Messages[^1].Content.Contains("대화 B") && savedB.Messages[^1].Content.Contains("완료: 대화 B") && !savedB.Messages[^1].Content.Contains("대화 A"), "Parallel streams crossed or failed");
+            Assert(savedA.ReasoningEffort == "low" && savedB.ReasoningEffort == "high" && savedB.Thinking == false, "Per-conversation options crossed");
+        });
+        await Test("same conversation file serializes concurrent saves", async () =>
+        {
+            var store = new ConversationStore(root); var c = new Conversation { Messages = [new() { Content = "stable" }] };
+            await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => Task.Run(() => store.Save(c))));
+            Assert(store.Get(c.Id).Messages[0].Content == "stable", "Concurrent save corrupted conversation");
+        });
         var report = Path.Combine(AppContext.BaseDirectory, "tools", "selftest-results.json");
         AtomicFile.Write(report, new { passed = failures == 0, tests = results });
         Directory.Delete(root, true);

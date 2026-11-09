@@ -36,7 +36,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(data)
                 return
-            assert self.headers.get('Authorization') == 'Bearer mock-key'
+            assert self.headers.get('Authorization') in ('Bearer mock-key', 'Bearer slow')
             assert self.headers.get('Content-Type', '').startswith('application/json')
             assert body['model'] == 'mock-exaone'
             assert 'parse_reasoning' not in body
@@ -49,7 +49,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.json_response(200, {'choices': [{'message': {'role': 'assistant', 'reasoning_content': '생각', 'content': ''}}]})
                 return self.json_response(200, {'choices': [{'message': {'role': 'assistant', 'content': 'hi'}}]})
             assert body['max_tokens'] == 8192
-            assert body['chat_template_kwargs'] == {'enable_thinking': True}
+            if mode == 'parallel':
+                assert body['chat_template_kwargs'] == {'enable_thinking': body['messages'][-1]['content'] != '대화 B'}
+            else:
+                assert body['chat_template_kwargs'] == {'enable_thinking': True}
             self.send_response(200)
             self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
             self.send_header('Connection', 'close')
@@ -62,7 +65,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
             self.wfile.write(b': heartbeat\r\n\r\n')
-            if mode == 'separate':
+            if mode == 'parallel':
+                user = body['messages'][-1]['content']
+                chunk(reasoning_content='생각: ' + user)
+                for part in ['시작: ' + user + '\n', '중간: ' + user + '\n', '완료: ' + user]:
+                    chunk(content=part)
+                    time.sleep(.3)
+            elif mode == 'separate':
                 chunk(reasoning_content='분리된 ')
                 chunk(reasoning_content='생각', content='최종 ')
                 chunk(content='답변')
@@ -77,6 +86,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b'data: {"choices": [], "usage": {"completion_tokens": 2}}\r\n\r\n')
                 chunk(content='사용량 답변')
                 self.wfile.write(b'data: {"choices": [], "usage": {"total_tokens": 12}}\r\n\r\n')
+                self.wfile.write(b'data: {"choices": [], "usage": {"prompt_tokens": 12, "completion_tokens": 567, "reasoning_tokens": 1234}}\r\n\r\n')
             elif mode == 'leading':
                 for text in ['\n', '\n  ', '<thi', 'nk>생각</think>', '\n\n', '  첫 줄', '\n\n  둘째 줄  ']:
                     chunk(content=text)

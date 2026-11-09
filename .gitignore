@@ -8,6 +8,9 @@ windows/tools/.selftest-*/
 
 # Web
 web/.env
+web/tools/artifacts/
+web/tools/frontend_artifacts/
+node_modules/
 
 # MCP server
 mcp/.venv/

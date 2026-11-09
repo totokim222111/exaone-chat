@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
@@ -13,10 +14,8 @@ internal sealed class MainForm : Form
     private readonly ConversationStore conversations;
     private readonly ApiClient api = new();
     private readonly string dataRoot;
-    private CancellationTokenSource? generation;
+    private readonly Dictionary<string, Generation> generations = [];
     private readonly CancellationTokenSource lifetime = new();
-    private Task? activeTask;
-    private Conversation? activeConversation;
     private bool finalClose;
     private bool shuttingDown;
     private readonly Dictionary<string, byte[]> assets = new(StringComparer.OrdinalIgnoreCase);
@@ -41,7 +40,7 @@ internal sealed class MainForm : Form
         Controls.Add(web);
         Shown += async (_, _) => await Initialize();
         FormClosing += OnAppClosing;
-        FormClosed += (_, _) => { lifetime.Cancel(); generation?.Dispose(); lifetime.Dispose(); api.Dispose(); web.Dispose(); };
+        FormClosed += (_, _) => { lifetime.Cancel(); foreach (var run in generations.Values) run.Cancellation.Dispose(); lifetime.Dispose(); api.Dispose(); web.Dispose(); };
     }
 
     private async Task Initialize()
@@ -72,11 +71,19 @@ internal sealed class MainForm : Form
                 if (!assets.TryGetValue(path, out var bytes))
                 { e.Response = env.CreateWebResourceResponse(new MemoryStream(), 404, "Not Found", "Content-Type: text/plain"); return; }
                 var type = Path.GetExtension(path).ToLowerInvariant() switch
-                { ".html" => "text/html; charset=utf-8", ".css" => "text/css; charset=utf-8", ".js" => "application/javascript; charset=utf-8", _ => "application/octet-stream" };
+                { ".html" => "text/html; charset=utf-8", ".css" => "text/css; charset=utf-8", ".js" => "application/javascript; charset=utf-8", ".woff2" => "font/woff2", ".svg" => "image/svg+xml", _ => "application/octet-stream" };
                 e.Response = env.CreateWebResourceResponse(new MemoryStream(bytes, false), 200, "OK", $"Content-Type: {type}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff");
             };
             core.NavigationStarting += (_, e) => { if (!e.Uri.StartsWith("https://app.exaone/", StringComparison.Ordinal)) e.Cancel = true; };
-            core.NewWindowRequested += (_, e) => e.Handled = true;
+            core.NewWindowRequested += (_, e) =>
+            {
+                e.Handled = true;
+                if (Uri.TryCreate(e.Uri, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http")
+                {
+                    try { Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true }); }
+                    catch (Exception ex) { MessageBox.Show(this, ex.Message, "링크를 열 수 없습니다."); }
+                }
+            };
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.WebMessageReceived += Receive;
@@ -99,9 +106,9 @@ internal sealed class MainForm : Form
         var error = ex is ApiException a ? a.ToError() : new ChatError(ex is HttpRequestException ? "네트워크 연결을 확인하세요." : ex.Message);
         Post(new { reqId, ok = false, error });
     }
-    private void GuardIdle()
+    private void GuardIdle(string id)
     {
-        if (generation is not null) throw new InvalidOperationException("응답이 끝나거나 중지한 뒤 다시 시도하세요.");
+        if (generations.ContainsKey(id)) throw new InvalidOperationException("응답이 끝나거나 중지한 뒤 다시 시도하세요.");
     }
     private async void Receive(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
@@ -116,6 +123,18 @@ internal sealed class MainForm : Form
             var p = m.TryGetProperty("payload", out var payload) ? payload : default;
             switch (type)
             {
+                case "saveFile":
+                    var filename = Path.GetFileName(p.GetProperty("name").GetString() ?? "document.md");
+                    var mime = p.GetProperty("mime").GetString();
+                    var text = p.GetProperty("text").GetString() ?? "";
+                    using (var dialog = new SaveFileDialog { FileName = filename, AddExtension = true, OverwritePrompt = true,
+                        Filter = mime == "image/svg+xml" ? "SVG 이미지 (*.svg)|*.svg" : "Markdown 문서 (*.md)|*.md", DefaultExt = mime == "image/svg+xml" ? "svg" : "md" })
+                    {
+                        if (dialog.ShowDialog(this) != DialogResult.OK) { Reply(reqId, new { saved = false, cancelled = true }); break; }
+                        await File.WriteAllTextAsync(dialog.FileName, text, new UTF8Encoding(false), lifetime.Token);
+                        Reply(reqId, new { saved = true, cancelled = false });
+                    }
+                    break;
                 case "settings.get": Reply(reqId, settings.Public()); break;
                 case "settings.save":
                     var next = settings.Draft(p); settings.Save(next); Reply(reqId, settings.Public()); break;
@@ -124,83 +143,73 @@ internal sealed class MainForm : Form
                     await api.Check(draft, SettingsStore.Decrypt(draft), lifetime.Token);
                     Reply(reqId, new { message = "연결됨" }); break;
                 case "conversations.list": Reply(reqId, conversations.List()); break;
-                case "conversations.get": Reply(reqId, activeConversation?.Id == p.GetProperty("id").GetString() ? activeConversation : conversations.Get(p.GetProperty("id").GetString()!)); break;
+                case "conversations.get": Reply(reqId, Current(p.GetProperty("id").GetString()!)); break;
                 case "conversations.rename":
-                    GuardIdle(); conversations.Rename(p.GetProperty("id").GetString()!, p.GetProperty("title").GetString()!); Reply(reqId, conversations.List()); break;
+                    GuardIdle(p.GetProperty("id").GetString()!); conversations.Rename(p.GetProperty("id").GetString()!, p.GetProperty("title").GetString()!); Reply(reqId, conversations.List()); break;
                 case "conversations.delete":
-                    GuardIdle(); conversations.Delete(p.GetProperty("id").GetString()!); Reply(reqId, conversations.List()); break;
+                    var deleteId = p.GetProperty("id").GetString()!;
+                    if (generations.TryGetValue(deleteId, out var deleting)) { deleting.Cancellation.Cancel(); await deleting.Completion; }
+                    conversations.Delete(deleteId); Reply(reqId, conversations.List()); break;
                 case "conversations.save":
-                    GuardIdle();
                     var c = Json.Read<Conversation>(p.GetRawText());
+                    GuardIdle(c.Id);
                     if (c.Messages.Any(x => x.Role is not ("user" or "assistant"))) throw new InvalidOperationException("메시지 역할이 올바르지 않습니다.");
                     conversations.Save(c); Reply(reqId, c); break;
-                case "chat.stop": generation?.Cancel(); Reply(reqId, new { stopped = true }); break;
-                case "chat.send":
-                    GuardIdle();
-                    generation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                    // Clone before this handler's JsonDocument is disposed.
-                    var sendPayload = p.Clone();
-                    activeTask = Generate(reqId, sendPayload, generation.Token);
-                    await activeTask; break;
+                case "conversations.create":
+                    var created = new Conversation();
+                    if (p.TryGetProperty("title", out var title)) created.Title = title.GetString() ?? "새 대화";
+                    SelectOptions(created, p); conversations.Save(created); Reply(reqId, created); break;
+                case "chat.selection":
+                    var selectionId = p.TryGetProperty("id", out var selectedId) ? selectedId.GetString() : null;
+                    var selected = string.IsNullOrEmpty(selectionId) ? new Conversation() : Current(selectionId);
+                    SelectOptions(selected, p);
+                    if (!string.IsNullOrEmpty(selectionId)) conversations.Save(selected);
+                    Reply(reqId, new { selected.ReasoningEffort, selected.Thinking }); break;
+                case "chat.stop":
+                    var stopId = p.GetProperty("id").GetString()!;
+                    if (generations.TryGetValue(stopId, out var stopping)) { stopping.Cancellation.Cancel(); await stopping.Completion; }
+                    Reply(reqId, new { stopped = true, conversationId = stopId }); break;
+                case "chat.send": await Generate(reqId, p.Clone()); break;
                 default: throw new InvalidOperationException("지원하지 않는 요청입니다.");
             }
         }
         catch (Exception ex) { Fail(reqId, ex); }
     }
 
-    private async Task Generate(string reqId, JsonElement p, CancellationToken ct)
+    private Conversation Current(string id) => generations.TryGetValue(id, out var run) ? run.Conversation : conversations.Get(id);
+
+    private AppSettings SelectOptions(Conversation c, JsonElement p)
     {
-        Conversation? c = null;
-        ChatMessage? answer = null;
-        var stopped = false;
-        ChatError? failure = null;
+        var effort = p.TryGetProperty("reasoningEffort", out var e) ? e.GetString() : null;
+        bool? thinking = p.TryGetProperty("thinking", out var t) ? t.GetBoolean() : null;
+        var snapshot = ConversationOptions.Apply(c, settings.Value, effort, thinking);
+        settings.Save(); return snapshot;
+    }
+    private async Task Generate(string reqId, JsonElement p)
+    {
+        var id = p.TryGetProperty("id", out var item) ? item.GetString() : null;
+        var c = string.IsNullOrEmpty(id) ? new Conversation() : Current(id);
+        GuardIdle(c.Id);
+        if (generations.Count >= 8) throw new InvalidOperationException("동시에 8개까지 답변을 받을 수 있습니다.");
+        var content = p.GetProperty("content").GetString()?.Trim() ?? "";
+        var retry = p.TryGetProperty("retry", out var r) && r.GetBoolean();
+        int? editIndex = p.TryGetProperty("editIndex", out var edit) && edit.ValueKind == JsonValueKind.Number ? edit.GetInt32() : null;
+        var snapshot = SelectOptions(c, p);
+        ChatHistory.Prepare(c, content, retry, editIndex);
+        var run = new Generation(c, snapshot, CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token));
+        generations.Add(c.Id, run);
         try
         {
-            var s = Json.Read<AppSettings>(Json.Serialize(settings.Value));
-            var text = p.GetProperty("content").GetString()?.Trim() ?? "";
-            var retry = p.TryGetProperty("retry", out var r) && r.GetBoolean();
-            var id = p.TryGetProperty("id", out var i) ? i.GetString() : null;
-            c = string.IsNullOrEmpty(id) ? new() : conversations.Get(id);
-            if (retry)
+            run.Completion = run.Run(api, conversations, (kind, text, error) =>
             {
-                if (c.Messages.LastOrDefault()?.Role == "assistant") c.Messages.RemoveAt(c.Messages.Count - 1);
-                if (c.Messages.LastOrDefault()?.Role != "user") throw new InvalidOperationException("다시 시도할 메시지가 없습니다.");
-            }
-            else
-            {
-                if (text.Length == 0) throw new InvalidOperationException("메시지를 입력하세요.");
-                if (c.Messages.Count == 0) c.Title = string.Concat(System.Globalization.StringInfo.GetTextElementEnumerator(text).AsEnumerable().Take(30));
-                c.Messages.Add(new() { Role = "user", Content = text });
-            }
-            c.Model = s.Model;
-            var history = c.Messages.ToList();
-            answer = new() { Role = "assistant", Reasoning = "" };
-            c.Messages.Add(answer);
-            activeConversation = c;
-            conversations.Save(c);
-            Post(new { reqId, @event = "start", conversation = c });
-            var lastSave = DateTime.UtcNow;
-            await api.Stream(s, SettingsStore.Decrypt(s), history, (kind, value) =>
-            {
-                if (kind == "reasoning") answer.Reasoning += value; else answer.Content += value;
-                Post(new { reqId, @event = kind, text = value, conversationId = c.Id });
-                if (DateTime.UtcNow - lastSave > TimeSpan.FromSeconds(1)) { conversations.Save(c); lastSave = DateTime.UtcNow; }
-            }, ct);
+                if (kind == "start") Post(new { reqId, @event = kind, conversationId = c.Id, conversation = c });
+                else if (kind == "done") Post(new { reqId, @event = kind, conversationId = c.Id, ok = true,
+                    result = new { conversation = c, stopped = run.Stopped, error = run.Error } });
+                else Post(new { reqId, @event = kind, conversationId = c.Id, text, error });
+            });
+            await run.Completion;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { stopped = true; }
-        catch (Exception ex)
-        {
-            failure = ex is ApiException a ? a.ToError() : new(ex.Message);
-            if (answer is not null) answer.Error = failure;
-            Post(new { reqId, @event = "error", error = failure, conversationId = c?.Id });
-        }
-        finally
-        {
-            try { if (c is not null) conversations.Save(c); }
-            catch (Exception ex) { failure = new("대화를 저장할 수 없습니다. " + ex.Message); Post(new { reqId, @event = "error", error = failure }); }
-            generation?.Dispose(); generation = null; activeConversation = null;
-            Post(new { reqId, @event = "done", ok = true, result = new { conversation = c, stopped, error = failure } });
-        }
+        finally { generations.Remove(c.Id); run.Cancellation.Dispose(); }
     }
 
     private async void OnAppClosing(object? sender, FormClosingEventArgs e)
@@ -209,8 +218,10 @@ internal sealed class MainForm : Form
         e.Cancel = true;
         if (shuttingDown) return;
         shuttingDown = true;
-        generation?.Cancel(); lifetime.Cancel();
-        if (activeTask is not null) await activeTask;
+        var pendingRuns = generations.Values.ToArray();
+        foreach (var run in pendingRuns) run.Cancellation.Cancel();
+        lifetime.Cancel();
+        await Task.WhenAll(pendingRuns.Select(run => run.Completion));
         try
         {
             var b = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
